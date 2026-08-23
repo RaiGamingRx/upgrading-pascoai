@@ -208,6 +208,36 @@
     box-shadow: var(--glow-cyan-sm);
   }
 
+  /* ── Interactive 3D Spotlight Card ── */
+  .interactive-card {
+    --spotlight-x: 50%;
+    --spotlight-y: 50%;
+    --card-rx: 0deg;
+    --card-ry: 0deg;
+    transform: perspective(1000px) rotateX(var(--card-rx, 0deg)) rotateY(var(--card-ry, 0deg));
+    transition: transform 120ms ease-out, border-color 200ms ease, box-shadow 250ms ease;
+    will-change: transform;
+  }
+
+  .interactive-card__spotlight {
+    background: radial-gradient(
+      450px circle at var(--spotlight-x, 50%) var(--spotlight-y, 50%),
+      var(--spotlight-color, rgba(34, 211, 238, 0.12)),
+      transparent 70%
+    );
+    opacity: 0;
+    transition: opacity 250ms ease;
+  }
+
+  .interactive-card:hover .interactive-card__spotlight {
+    opacity: 1;
+  }
+
+  .interactive-card__edge {
+    background: linear-gradient(90deg, transparent, var(--spotlight-color, hsl(var(--primary) / 0.3)), transparent);
+    opacity: 0.6;
+  }
+
   /* ── Neon text/border ── */
   .neon-text { text-shadow: var(--glow-cyan); }
   .neon-text-green { text-shadow: var(--glow-green); }
@@ -653,6 +683,155 @@
   50% {
     opacity: 0.75;
     transform: scale(1.06) translate(2%, -2%);
+  }
+}
+
+/* ── Ambient Background & Cybersecurity Atmosphere Animations ── */
+@keyframes ambient-aurora-cyan {
+  0% {
+    transform: translate3d(-8%, -10%, 0) scale(1);
+    opacity: 0.6;
+  }
+  25% {
+    transform: translate3d(12%, 4%, 0) scale(1.1);
+    opacity: 0.85;
+  }
+  50% {
+    transform: translate3d(6%, 15%, 0) scale(0.95);
+    opacity: 0.65;
+  }
+  75% {
+    transform: translate3d(-14%, 6%, 0) scale(1.08);
+    opacity: 0.75;
+  }
+  100% {
+    transform: translate3d(-8%, -10%, 0) scale(1);
+    opacity: 0.6;
+  }
+}
+
+@keyframes ambient-aurora-violet {
+  0% {
+    transform: translate3d(10%, 8%, 0) scale(1);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translate3d(-12%, -10%, 0) scale(1.15);
+    opacity: 0.75;
+  }
+  65% {
+    transform: translate3d(-6%, 14%, 0) scale(0.92);
+    opacity: 0.55;
+  }
+  100% {
+    transform: translate3d(10%, 8%, 0) scale(1);
+    opacity: 0.5;
+  }
+}
+
+@keyframes ambient-aurora-emerald {
+  0% {
+    transform: translate3d(-12%, 10%, 0) scale(0.95);
+    opacity: 0.45;
+  }
+  35% {
+    transform: translate3d(10%, -8%, 0) scale(1.12);
+    opacity: 0.7;
+  }
+  70% {
+    transform: translate3d(-4%, -16%, 0) scale(1.02);
+    opacity: 0.5;
+  }
+  100% {
+    transform: translate3d(-12%, 10%, 0) scale(0.95);
+    opacity: 0.45;
+  }
+}
+
+@keyframes ambient-aurora-core {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0.35;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.16);
+    opacity: 0.58;
+  }
+}
+
+@keyframes ambient-grid-drift {
+  0% {
+    background-position: 0px 0px;
+  }
+  100% {
+    background-position: 56px 56px;
+  }
+}
+
+@keyframes ambient-grid-pulse {
+  0%, 100% {
+    opacity: 0.18;
+  }
+  50% {
+    opacity: 0.32;
+  }
+}
+
+@keyframes ambient-backdrop-shift {
+  0%, 100% {
+    background-color: #060911;
+  }
+  33% {
+    background-color: #080a18;
+  }
+  66% {
+    background-color: #050d14;
+  }
+}
+
+.animate-ambient-cyan {
+  animation: ambient-aurora-cyan 22s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.animate-ambient-violet {
+  animation: ambient-aurora-violet 28s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.animate-ambient-emerald {
+  animation: ambient-aurora-emerald 25s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.animate-ambient-core {
+  animation: ambient-aurora-core 16s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.animate-grid-drift {
+  animation: ambient-grid-drift 45s linear infinite;
+  will-change: background-position;
+}
+
+.animate-grid-pulse {
+  animation: ambient-grid-pulse 12s ease-in-out infinite;
+}
+
+.animate-backdrop-shift {
+  animation: ambient-backdrop-shift 36s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ambient-cyan,
+  .animate-ambient-violet,
+  .animate-ambient-emerald,
+  .animate-ambient-core,
+  .animate-grid-drift,
+  .animate-grid-pulse,
+  .animate-backdrop-shift {
+    animation: none !important;
+    transform: none !important;
   }
 }
 

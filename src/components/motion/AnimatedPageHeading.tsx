@@ -71,7 +71,7 @@ export function AnimatedPageHeading({
 
           {/* Animated Gradient Title */}
           <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-white flex items-center gap-3">
-            <span className="bg-gradient-to-r from-cyan-400 via-cyan-200 via-50% to-indigo-400 bg-clip-text text-transparent bg-[length:200%_auto] animate-gradient-shift">
+            <span className="bg-gradient-to-r from-cyan-400 via-sky-200 via-40% to-indigo-400 bg-clip-text text-transparent bg-[length:250%_100%] animate-gradient-shift">
               {title}
             </span>
           </h1>

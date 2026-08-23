@@ -1,38 +1,30 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { InteractiveCard } from "@/components/motion/InteractiveCard";
-import { GlassPanel } from "@/components/motion/GlassPanel";
-import { SecurityGauge } from "@/components/security/SecurityGauge";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { RevealOnScroll } from "@/components/motion/RevealOnScroll";
 import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
-import { CountUp } from "@/components/motion/CountUp";
-import { EmptyState } from "@/components/ui/EmptyState";
+import { ExportReportModal } from "@/components/security/ExportReportModal";
+import { DefensePostureHero, type DefenseFactor } from "@/components/dashboard/DefensePostureHero";
+import { MetricsGrid } from "@/components/dashboard/MetricsGrid";
+import { SecurityCharts, type TimelineDataPoint, type SeverityCount, type CategoryDistribution } from "@/components/dashboard/SecurityCharts";
+import { AIBriefingSection } from "@/components/dashboard/AIBriefingSection";
+import { SecuritySuitesGrid } from "@/components/dashboard/SecuritySuitesGrid";
+import { ActivityTimeline, type UnifiedActivityItem } from "@/components/dashboard/ActivityTimeline";
+import { generateExecutiveReport } from "@/lib/reportModel";
 import {
   Shield,
-  Key,
-  Search,
+  FileText,
   Scan,
-  ArrowRight,
-  Clock,
-  TrendingUp,
-  Activity,
-  Zap,
-  Lock,
   Globe,
   MailCheck,
-  Trash2,
-  Cpu,
-  Layers,
-  FileText,
+  Lock,
+  Key,
+  Search,
 } from "lucide-react";
 import { toast } from "sonner";
-import { ExportReportModal } from "@/components/security/ExportReportModal";
 
 /* -------------------- Storage Keys across all PascoAI suites -------------------- */
 const SCAN_HISTORY_KEY = "pasco_scan_history_v1";
+const SCAN_HISTORY_V2_KEY = "pasco_scanner_history_v2";
 const WEBSEC_HISTORY_KEY = "pasco_websec_history_v1";
 const EMAIL_HISTORY_KEY = "pasco_email_history_v1";
 const PASSWORD_HISTORY_KEY = "pasco_password_history_v1";
@@ -64,78 +56,7 @@ function timeAgo(dateStringOrTimestamp: string | number): string {
   return `${days}d ago`;
 }
 
-type UnifiedActivity = {
-  id: string;
-  type: "scan" | "websec" | "email" | "crypto" | "password" | "research" | "sim";
-  title: string;
-  target: string;
-  timestamp: number;
-  timeLabel: string;
-  status: "success" | "warning" | "error";
-  score?: number | null;
-  path: string;
-};
-
-const quickActionTools = [
-  {
-    icon: Scan,
-    label: "Domain Scanner",
-    description: "Real-time host reconnaissance, open services & headers",
-    path: "/scanner",
-    color: "text-primary",
-    glow: "cyan" as const,
-    badge: "Scanner",
-  },
-  {
-    icon: Globe,
-    label: "Web Security Suite",
-    description: "Live TLS cert, DNS records & cookie flag security audit",
-    path: "/web-security",
-    color: "text-emerald-400",
-    glow: "emerald" as const,
-    badge: "TLS / DNS",
-  },
-  {
-    icon: Lock,
-    label: "Crypto Lab",
-    description: "AES-256-GCM authenticated text & file encryption engine",
-    path: "/crypto",
-    color: "text-secondary",
-    glow: "purple" as const,
-    badge: "WebCrypto",
-  },
-  {
-    icon: MailCheck,
-    label: "Email Security",
-    description: "DNS MX, SPF, DMARC validation & phishing heuristics",
-    path: "/email-security",
-    color: "text-amber-400",
-    glow: "amber" as const,
-    badge: "Anti-Spoof",
-  },
-  {
-    icon: Key,
-    label: "Password Lab",
-    description: "NIST entropy math & HaveIBeenPwned API verification",
-    path: "/password-lab",
-    color: "text-primary",
-    glow: "cyan" as const,
-    badge: "Entropy",
-  },
-  {
-    icon: Search,
-    label: "AI Research Suite",
-    description: "Gemini-powered Blue/Red/SOC security threat research",
-    path: "/research",
-    color: "text-emerald-400",
-    glow: "emerald" as const,
-    badge: "AI Threat",
-  },
-];
-
 export default function Dashboard() {
-  const navigate = useNavigate();
-
   const [scanHistory, setScanHistory] = useState<Record<string, unknown>[]>([]);
   const [websecHistory, setWebsecHistory] = useState<Record<string, unknown>[]>([]);
   const [emailHistory, setEmailHistory] = useState<Record<string, unknown>[]>([]);
@@ -145,16 +66,38 @@ export default function Dashboard() {
   const [simHistory, setSimHistory] = useState<Record<string, unknown>[]>([]);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
 
-  useEffect(() => {
-    setScanHistory(safeJson(localStorage.getItem(SCAN_HISTORY_KEY), []));
+  // Load real telemetry data from localStorage
+  const loadPlatformHistory = () => {
+    const v1Scans = safeJson<Record<string, unknown>[]>(localStorage.getItem(SCAN_HISTORY_KEY), []);
+    const v2Scans = safeJson<Record<string, unknown>[]>(localStorage.getItem(SCAN_HISTORY_V2_KEY), []);
+    const combinedScans = Array.isArray(v1Scans) && v1Scans.length > 0 ? v1Scans : v2Scans;
+
+    setScanHistory(combinedScans);
     setWebsecHistory(safeJson(localStorage.getItem(WEBSEC_HISTORY_KEY), []));
     setEmailHistory(safeJson(localStorage.getItem(EMAIL_HISTORY_KEY), []));
     setCryptoHistory(safeJson(localStorage.getItem(CRYPTO_HISTORY_KEY), []));
     setPasswordHistory(safeJson(localStorage.getItem(PASSWORD_HISTORY_KEY), []));
     setResearchHistory(safeJson(localStorage.getItem(RESEARCH_HISTORY_KEY), []));
     setSimHistory(safeJson(localStorage.getItem(SIMULATIONS_HISTORY_KEY), []));
+  };
+
+  useEffect(() => {
+    loadPlatformHistory();
+
+    // Listen for storage events across tabs
+    const onStorageChange = () => {
+      loadPlatformHistory();
+    };
+    window.addEventListener("storage", onStorageChange);
+    return () => window.removeEventListener("storage", onStorageChange);
   }, []);
 
+  // Compute normalized Executive Security Report from real audit storage
+  const executiveReport = useMemo(() => {
+    return generateExecutiveReport({ selectedTarget: "__ALL__" });
+  }, [scanHistory, websecHistory, emailHistory, cryptoHistory, passwordHistory, researchHistory, simHistory]);
+
+  // Aggregate Metrics & Health Status
   const metrics = useMemo(() => {
     const totalScans = scanHistory.length + websecHistory.length + emailHistory.length;
     const allScores: number[] = [];
@@ -170,79 +113,297 @@ export default function Dashboard() {
 
     const cryptoCount = cryptoHistory.length;
     const researchCount = researchHistory.length;
-    const hasLowScore = allScores.some((s) => s < 60);
+    const criticalCount = executiveReport.summary.criticalCount;
+    const highCount = executiveReport.summary.highCount;
+    const cleanChecksCount = executiveReport.summary.cleanChecksCount;
+
+    let systemStatus: "operational" | "warning" | "critical" = "operational";
+    if (criticalCount > 0) {
+      systemStatus = "critical";
+    } else if (highCount > 0 || allScores.some((s) => s < 60)) {
+      systemStatus = "warning";
+    }
 
     return {
       totalScans,
       avgScore,
       cryptoCount,
       researchCount,
-      systemStatus: hasLowScore ? ("warning" as const) : ("operational" as const),
+      criticalCount,
+      highCount,
+      criticalAndHighCount: criticalCount + highCount,
+      cleanChecksCount,
+      systemStatus,
     };
-  }, [scanHistory, websecHistory, emailHistory, cryptoHistory, researchHistory]);
+  }, [scanHistory, websecHistory, emailHistory, cryptoHistory, researchHistory, executiveReport]);
 
-  const recentActivity: UnifiedActivity[] = useMemo(() => {
-    const items: UnifiedActivity[] = [];
+  // Real Sub-Factor Assessment Ratings
+  const defenseFactors: DefenseFactor[] = useMemo(() => {
+    // 1. Network Recon
+    const scanScores = scanHistory
+      .map((s) => (typeof s.score === "number" ? s.score : null))
+      .filter((s): s is number => s !== null);
+    const avgScan =
+      scanScores.length > 0
+        ? Math.round(scanScores.reduce((a, b) => a + b, 0) / scanScores.length)
+        : null;
+
+    // 2. Web & TLS Hardening
+    const webScores = websecHistory
+      .map((w) => (typeof w.score === "number" ? w.score : null))
+      .filter((w): w is number => w !== null);
+    const avgWeb =
+      webScores.length > 0
+        ? Math.round(webScores.reduce((a, b) => a + b, 0) / webScores.length)
+        : null;
+
+    // 3. Email Anti-Spoofing
+    const emailScores = emailHistory
+      .map((e) => (typeof e.score === "number" ? e.score : null))
+      .filter((e): e is number => e !== null);
+    const avgEmail =
+      emailScores.length > 0
+        ? Math.round(emailScores.reduce((a, b) => a + b, 0) / emailScores.length)
+        : null;
+
+    // 4. Crypto Integrity
+    const cryptoCount = cryptoHistory.length;
+
+    // 5. Password Entropy
+    const passCount = passwordHistory.length;
+
+    return [
+      {
+        id: "factor-recon",
+        name: "Network & Port Recon",
+        category: "Host Perimeter",
+        score: avgScan,
+        status: avgScan !== null ? (avgScan >= 70 ? "verified" : "attention") : "pending",
+        description: "Open TCP port inspection, service detection, and perimeter host analysis.",
+        icon: Scan,
+        linkPath: "/scanner",
+      },
+      {
+        id: "factor-websec",
+        name: "Web & TLS Hardening",
+        category: "HTTP/TLS Layer",
+        score: avgWeb,
+        status: avgWeb !== null ? (avgWeb >= 70 ? "verified" : "attention") : "pending",
+        description: "SSL certificate validity, HSTS preload, CSP headers & cookie hardening.",
+        icon: Globe,
+        linkPath: "/web-security",
+      },
+      {
+        id: "factor-email",
+        name: "Email Anti-Spoofing",
+        category: "DNS Infrastructure",
+        score: avgEmail,
+        status: avgEmail !== null ? (avgEmail >= 70 ? "verified" : "attention") : "pending",
+        description: "Authoritative DNS MX, SPF records & DMARC reject/quarantine policies.",
+        icon: MailCheck,
+        linkPath: "/email-security",
+      },
+      {
+        id: "factor-crypto",
+        name: "AES-256 Cryptography",
+        category: "Cryptographic Lab",
+        score: cryptoCount > 0 ? 100 : null,
+        status: cryptoCount > 0 ? "verified" : "pending",
+        description: "Authenticated WebCrypto AES-GCM 256-bit ciphertext encryption pipeline.",
+        icon: Lock,
+        linkPath: "/crypto",
+      },
+    ];
+  }, [scanHistory, websecHistory, emailHistory, cryptoHistory, passwordHistory]);
+
+  // Unified Chronological Telemetry Points for Recharts Trend
+  const timelineData: TimelineDataPoint[] = useMemo(() => {
+    const points: { ts: number; score: number; target: string; suite: string }[] = [];
+
+    scanHistory.forEach((s, idx) => {
+      if (typeof s.score === "number") {
+        const ts = s.date ? new Date(String(s.date)).getTime() : Date.now() - idx * 3600000;
+        points.push({
+          ts,
+          score: s.score,
+          target: String(s.target || "Domain Recon"),
+          suite: "Network Scanner",
+        });
+      }
+    });
+
+    websecHistory.forEach((w, idx) => {
+      if (typeof w.score === "number") {
+        const ts = w.scannedAt ? new Date(String(w.scannedAt)).getTime() : Date.now() - idx * 3600000;
+        const target = w.finalUrl ? new URL(String(w.finalUrl)).hostname : String(w.url || "Web Target");
+        points.push({
+          ts,
+          score: w.score,
+          target,
+          suite: "Web Security",
+        });
+      }
+    });
+
+    emailHistory.forEach((e, idx) => {
+      if (typeof e.score === "number") {
+        const ts = typeof e.scannedAt === "number" ? e.scannedAt : new Date(String(e.scannedAt || Date.now())).getTime();
+        points.push({
+          ts,
+          score: e.score,
+          target: String(e.email || e.domain || "Email Domain"),
+          suite: "Email Security",
+        });
+      }
+    });
+
+    // Sort ascending by time for chart
+    points.sort((a, b) => a.ts - b.ts);
+
+    return points.map((p) => {
+      const d = new Date(p.ts);
+      const dateLabel = isNaN(d.getTime())
+        ? "Audit"
+        : `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+      return {
+        timestamp: p.ts,
+        dateLabel,
+        score: p.score,
+        target: p.target,
+        suite: p.suite,
+      };
+    });
+  }, [scanHistory, websecHistory, emailHistory]);
+
+  // Real Threat Severity Distribution
+  const severityData: SeverityCount[] = useMemo(() => {
+    return [
+      {
+        name: "Critical",
+        count: executiveReport.summary.criticalCount,
+        color: "#f43f5e",
+        fill: "#f43f5e",
+      },
+      {
+        name: "High",
+        count: executiveReport.summary.highCount,
+        color: "#f59e0b",
+        fill: "#f59e0b",
+      },
+      {
+        name: "Medium",
+        count: executiveReport.summary.mediumCount,
+        color: "#eab308",
+        fill: "#eab308",
+      },
+      {
+        name: "Low",
+        count: executiveReport.summary.lowCount,
+        color: "#06b6d4",
+        fill: "#06b6d4",
+      },
+      {
+        name: "Info",
+        count: executiveReport.summary.infoCount,
+        color: "#94a3b8",
+        fill: "#64748b",
+      },
+    ];
+  }, [executiveReport]);
+
+  // Category Distribution from Real Assessed Domains
+  const categoryData: CategoryDistribution[] = useMemo(() => {
+    const list: CategoryDistribution[] = [];
+
+    executiveReport.domains.forEach((dom) => {
+      const issues = dom.findings.length;
+      const passed = dom.cleanChecks.length;
+      const total = issues + passed;
+      if (total > 0) {
+        list.push({
+          category: dom.name,
+          passed,
+          issues,
+          total,
+        });
+      }
+    });
+
+    return list;
+  }, [executiveReport]);
+
+  // Unified Activity Feed
+  const recentActivities: UnifiedActivityItem[] = useMemo(() => {
+    const items: UnifiedActivityItem[] = [];
 
     // 1. Domain Scans
     scanHistory.forEach((s, idx) => {
-      const ts = s.date ? new Date(s.date).getTime() : Date.now() - idx * 3600000;
+      const ts = s.date ? new Date(String(s.date)).getTime() : Date.now() - idx * 3600000;
+      const scoreNum = typeof s.score === "number" ? s.score : null;
       items.push({
-        id: `scan-${idx}`,
+        id: `scan-${idx}-${ts}`,
         type: "scan",
-        title: "Domain Security Scan",
-        target: s.target || "Target Host",
+        title: "Domain Reconnaissance Scan",
+        target: String(s.target || "Target Host"),
         timestamp: ts,
-        timeLabel: timeAgo(s.date || ts),
-        status: s.score >= 75 ? "success" : s.score >= 50 ? "warning" : "error",
-        score: s.score,
+        timeLabel: timeAgo(s.date ? String(s.date) : ts),
+        status: scoreNum !== null ? (scoreNum >= 75 ? "success" : scoreNum >= 50 ? "warning" : "error") : "success",
+        score: scoreNum,
         path: "/scanner",
       });
     });
 
     // 2. Web Security Scans
     websecHistory.forEach((w, idx) => {
-      const ts = w.scannedAt ? new Date(w.scannedAt).getTime() : Date.now() - idx * 3600000;
+      const ts = w.scannedAt ? new Date(String(w.scannedAt)).getTime() : Date.now() - idx * 3600000;
+      const scoreNum = typeof w.score === "number" ? w.score : null;
+      let target = String(w.url || "Web Target");
+      try {
+        if (w.finalUrl) target = new URL(String(w.finalUrl)).hostname;
+      } catch {
+        // fallback
+      }
       items.push({
-        id: `websec-${idx}`,
+        id: `websec-${idx}-${ts}`,
         type: "websec",
-        title: "Web Suite Audit",
-        target: w.finalUrl ? new URL(w.finalUrl).hostname : w.url || "Web Target",
+        title: "Web Security & Header Audit",
+        target,
         timestamp: ts,
-        timeLabel: timeAgo(w.scannedAt || ts),
-        status: w.score >= 75 ? "success" : w.score >= 50 ? "warning" : "error",
-        score: w.score,
+        timeLabel: timeAgo(w.scannedAt ? String(w.scannedAt) : ts),
+        status: scoreNum !== null ? (scoreNum >= 75 ? "success" : scoreNum >= 50 ? "warning" : "error") : "success",
+        score: scoreNum,
         path: "/web-security",
       });
     });
 
     // 3. Email Checks
     emailHistory.forEach((e, idx) => {
-      const ts = typeof e.scannedAt === "number" ? e.scannedAt : new Date(e.scannedAt || Date.now()).getTime();
+      const ts = typeof e.scannedAt === "number" ? e.scannedAt : new Date(String(e.scannedAt || Date.now())).getTime();
+      const scoreNum = typeof e.score === "number" ? e.score : null;
       items.push({
-        id: `email-${idx}`,
+        id: `email-${idx}-${ts}`,
         type: "email",
-        title: "Email Security Verification",
-        target: e.email || "Email Address",
+        title: "Email Anti-Spoofing & DMARC",
+        target: String(e.email || e.domain || "Email Address"),
         timestamp: ts,
         timeLabel: timeAgo(ts),
-        status: e.score >= 80 ? "success" : e.score >= 60 ? "warning" : "error",
-        score: e.score,
+        status: scoreNum !== null ? (scoreNum >= 80 ? "success" : scoreNum >= 60 ? "warning" : "error") : "success",
+        score: scoreNum,
         path: "/email-security",
       });
     });
 
     // 4. Crypto operations
     cryptoHistory.forEach((c, idx) => {
-      const ts = c.ts || Date.now() - idx * 3600000;
+      const ts = typeof c.ts === "number" ? c.ts : Date.now() - idx * 3600000;
       items.push({
-        id: `crypto-${idx}`,
+        id: `crypto-${idx}-${ts}`,
         type: "crypto",
-        title: c.action === "encrypt" ? `AES-256 Encrypted (${c.kind})` : `Token Decrypted (${c.kind})`,
-        target: c.filename || (c.fingerprint ? `fp:${c.fingerprint.slice(0, 10)}...` : "Secure Payload"),
+        title: c.action === "encrypt" ? `AES-256 Encrypted (${String(c.kind || "Text")})` : `Token Decrypted (${String(c.kind || "Payload")})`,
+        target: String(c.filename || (c.fingerprint ? `fp:${String(c.fingerprint).slice(0, 12)}...` : "Authenticated Payload")),
         timestamp: ts,
         timeLabel: timeAgo(ts),
-        status: c.ok ? "success" : "error",
+        status: c.ok !== false ? "success" : "error",
         score: null,
         path: "/crypto",
       });
@@ -250,27 +411,62 @@ export default function Dashboard() {
 
     // 5. Research Sessions
     researchHistory.forEach((r, idx) => {
-      const ts = r.date ? new Date(r.date).getTime() : Date.now() - idx * 3600000;
+      const ts = r.date ? new Date(String(r.date)).getTime() : Date.now() - idx * 3600000;
       items.push({
-        id: `research-${idx}`,
+        id: `research-${idx}-${ts}`,
         type: "research",
-        title: `AI Research (${r.persona || "Security"})`,
-        target: r.topic ? r.topic.slice(0, 40) + "..." : "Cybersecurity Research",
+        title: `AI Threat Intel (${String(r.persona || "Security")})`,
+        target: r.topic ? String(r.topic).slice(0, 45) + "..." : "Gemini Threat Synthesis",
         timestamp: ts,
-        timeLabel: timeAgo(r.date || ts),
+        timeLabel: timeAgo(r.date ? String(r.date) : ts),
         status: "success",
         score: null,
         path: "/research",
       });
     });
 
-    return items.sort((a, b) => b.timestamp - a.timestamp).slice(0, 8);
-  }, [scanHistory, websecHistory, emailHistory, cryptoHistory, researchHistory]);
+    // 6. Simulations
+    simHistory.forEach((s, idx) => {
+      const ts = s.date ? new Date(String(s.date)).getTime() : Date.now() - idx * 3600000;
+      items.push({
+        id: `sim-${idx}-${ts}`,
+        type: "sim",
+        title: `Sandbox Simulation (${String(s.title || "Cyber Triage")})`,
+        target: String(s.categoryId || "Threat Scenario"),
+        timestamp: ts,
+        timeLabel: timeAgo(s.date ? String(s.date) : ts),
+        status: "success",
+        score: null,
+        path: "/simulations",
+      });
+    });
+
+    return items.sort((a, b) => b.timestamp - a.timestamp);
+  }, [scanHistory, websecHistory, emailHistory, cryptoHistory, researchHistory, simHistory]);
+
+  const latestAuditTime = useMemo(() => {
+    if (recentActivities.length === 0) return null;
+    return recentActivities[0].timeLabel;
+  }, [recentActivities]);
+
+  const topFinding = useMemo(() => {
+    for (const dom of executiveReport.domains) {
+      const critical = dom.findings.find((f) => f.severity === "critical" || f.severity === "high");
+      if (critical) {
+        return {
+          domain: critical.target,
+          recommendation: critical.recommendation,
+        };
+      }
+    }
+    return null;
+  }, [executiveReport]);
 
   const clearAllHistory = () => {
     if (!confirm("Clear all activity history across all security tools?")) return;
 
     localStorage.removeItem(SCAN_HISTORY_KEY);
+    localStorage.removeItem(SCAN_HISTORY_V2_KEY);
     localStorage.removeItem(WEBSEC_HISTORY_KEY);
     localStorage.removeItem(EMAIL_HISTORY_KEY);
     localStorage.removeItem(CRYPTO_HISTORY_KEY);
@@ -286,7 +482,7 @@ export default function Dashboard() {
     setResearchHistory([]);
     setSimHistory([]);
 
-    toast.success("All platform history cleared");
+    toast.success("All platform telemetry cleared");
   };
 
   return (
@@ -294,264 +490,79 @@ export default function Dashboard() {
       {/* Animated Header Banner */}
       <AnimatedPageHeading
         title="Security Command Center"
-        subtitle="Unified threat intelligence, live network inspection, cryptography & simulation suites."
-        badgeText="LIVE TELEMETRY"
+        subtitle="Unified cyber defense telemetry, live network reconnaissance, authenticated cryptography & simulation suites."
+        badgeText="TELEMETRY SYNCHRONIZED"
         badgeVariant="cyan"
-        statusText={metrics.systemStatus === "operational" ? "All Systems Operational" : "Action Required"}
-        statusColor={metrics.systemStatus === "operational" ? "emerald" : "amber"}
-        icon={Shield}
-        actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setIsReportModalOpen(true)}
-            className="text-xs font-mono border-primary/30 hover:border-primary/60 text-primary bg-primary/5 hover:bg-primary/10 shadow-[0_0_12px_rgba(34,211,238,0.12)] active:scale-95 transition-all"
-          >
-            <FileText className="w-3.5 h-3.5 mr-1.5 text-primary" />
-            <span>Export Executive Briefing</span>
-          </Button>
+        statusText={
+          metrics.systemStatus === "operational"
+            ? "All Defensive Systems Operational"
+            : metrics.systemStatus === "warning"
+            ? "Remediation Recommended"
+            : "Critical Deficits Detected"
         }
+        statusColor={
+          metrics.systemStatus === "operational"
+            ? "emerald"
+            : metrics.systemStatus === "warning"
+            ? "amber"
+            : "rose"
+        }
+        icon={Shield}
       />
 
-      {/* Top Overview Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6">
-        {/* Left: Overall Health Dial */}
-        <RevealOnScroll direction="scale" className="lg:col-span-4 h-full">
-          <div data-tour="defense-gauge" className="h-full">
-            <InteractiveCard glowColor="cyan" className="p-6 flex flex-col items-center justify-center h-full min-h-[220px]">
-              <SecurityGauge score={metrics.avgScore} size="lg" label="Defense Score" />
-              <div className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground font-mono">
-                <TrendingUp className="w-3.5 h-3.5 text-primary" />
-                <span>Aggregated posture rating</span>
-              </div>
-            </InteractiveCard>
-          </div>
-        </RevealOnScroll>
+      {/* Signature Centerpiece: Defense Posture Radial Hero */}
+      <RevealOnScroll direction="scale">
+        <DefensePostureHero
+          score={metrics.avgScore}
+          totalAudits={metrics.totalScans}
+          criticalIssues={metrics.criticalAndHighCount}
+          factors={defenseFactors}
+          lastAuditTime={latestAuditTime}
+          systemStatus={metrics.systemStatus}
+          onOpenReportModal={() => setIsReportModalOpen(true)}
+        />
+      </RevealOnScroll>
 
-        {/* Right: Key Stat Cards */}
-        <div className="lg:col-span-8 grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4">
-          <RevealOnScroll direction="up" delay={50}>
-            <InteractiveCard glowColor="cyan" className="p-4 sm:p-5 flex flex-col justify-between h-full">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Scans Run
-                </span>
-                <div className="p-1.5 sm:p-2 rounded-lg bg-primary/10 text-primary">
-                  <Scan className="w-4 h-4" />
-                </div>
-              </div>
-              <div className="mt-3 sm:mt-4">
-                <span className="text-2xl sm:text-3xl font-bold font-mono text-primary">
-                  <CountUp end={metrics.totalScans} />
-                </span>
-                <p className="text-[11px] text-muted-foreground mt-0.5">Domains & headers</p>
-              </div>
-            </InteractiveCard>
-          </RevealOnScroll>
+      {/* Operational Metrics Grid */}
+      <MetricsGrid
+        totalScans={metrics.totalScans}
+        criticalAndHighCount={metrics.criticalAndHighCount}
+        cleanChecksCount={metrics.cleanChecksCount}
+        cryptoCount={metrics.cryptoCount}
+        researchCount={metrics.researchCount}
+      />
 
-          <RevealOnScroll direction="up" delay={100}>
-            <InteractiveCard glowColor="purple" className="p-4 sm:p-5 flex flex-col justify-between h-full">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Crypto Ops
-                </span>
-                <div className="p-1.5 sm:p-2 rounded-lg bg-secondary/15 text-secondary">
-                  <Lock className="w-4 h-4" />
-                </div>
-              </div>
-              <div className="mt-3 sm:mt-4">
-                <span className="text-2xl sm:text-3xl font-bold font-mono text-secondary">
-                  <CountUp end={metrics.cryptoCount} />
-                </span>
-                <p className="text-[11px] text-muted-foreground mt-0.5">AES-256 tokens</p>
-              </div>
-            </InteractiveCard>
-          </RevealOnScroll>
+      {/* AI Threat Briefing Section (Evidence-Backed) */}
+      <RevealOnScroll direction="up">
+        <AIBriefingSection
+          score={metrics.avgScore}
+          totalScans={metrics.totalScans}
+          criticalIssues={metrics.criticalAndHighCount}
+          topRiskDomain={topFinding?.domain || null}
+          topRecommendation={topFinding?.recommendation || null}
+          cleanChecksCount={metrics.cleanChecksCount}
+        />
+      </RevealOnScroll>
 
-          <RevealOnScroll direction="up" delay={150} className="col-span-2 sm:col-span-1">
-            <InteractiveCard glowColor="emerald" className="p-4 sm:p-5 flex flex-col justify-between h-full">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  AI Runs
-                </span>
-                <div className="p-1.5 sm:p-2 rounded-lg bg-emerald-500/10 text-emerald-400">
-                  <Search className="w-4 h-4" />
-                </div>
-              </div>
-              <div className="mt-3 sm:mt-4">
-                <span className="text-2xl sm:text-3xl font-bold font-mono text-emerald-400">
-                  <CountUp end={metrics.researchCount} />
-                </span>
-                <p className="text-[11px] text-muted-foreground mt-0.5">Threat reports</p>
-              </div>
-            </InteractiveCard>
-          </RevealOnScroll>
+      {/* Telemetry Visualizer Charts (Posture Trend, Severity, Category) */}
+      <RevealOnScroll direction="up">
+        <SecurityCharts
+          timelineData={timelineData}
+          severityData={severityData}
+          categoryData={categoryData}
+        />
+      </RevealOnScroll>
 
-          {/* Quick Security Tip Banner */}
-          <RevealOnScroll direction="up" delay={200} className="col-span-2 sm:col-span-3">
-            <GlassPanel variant="cyber" className="p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 shrink-0">
-                  <Zap className="w-4 h-4 sm:w-5 sm:h-5" />
-                </div>
-                <p className="text-xs sm:text-sm text-foreground">
-                  <span className="font-semibold text-amber-400">Pro Recommendation:</span> Enforce HSTS preload directives and strict CSP headers to protect web services against downgrade attacks.
-                </p>
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => navigate("/web-security")}
-                className="text-xs text-primary hover:text-primary hover:bg-primary/10 self-end sm:self-auto shrink-0 font-medium"
-              >
-                Audit Headers <ArrowRight className="w-3.5 h-3.5 ml-1" />
-              </Button>
-            </GlassPanel>
-          </RevealOnScroll>
-        </div>
-      </div>
+      {/* Security Suites & Interactive Labs Grid */}
+      <SecuritySuitesGrid />
 
-      {/* Quick Launchpad */}
-      <div data-tour="security-suites">
-        <div className="flex items-center justify-between mb-3 sm:mb-4">
-          <h2 className="text-base sm:text-lg font-bold tracking-tight flex items-center gap-2 text-foreground">
-            <Layers className="w-4 h-4 text-primary" />
-            Security Suites & Interactive Labs
-          </h2>
-          <span className="text-xs text-muted-foreground font-mono">7 Engines Active</span>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-          {quickActionTools.map((tool, idx) => (
-            <RevealOnScroll key={tool.label} direction="up" delay={40 * idx}>
-              <InteractiveCard
-                glowColor={tool.glow}
-                onClick={() => navigate(tool.path)}
-                className="p-4 sm:p-5 cursor-pointer group hover:border-primary/50 h-full flex flex-col justify-between"
-              >
-                <div>
-                  <div className="flex items-start justify-between">
-                    <div className={`p-2.5 rounded-xl bg-card border border-border/80 ${tool.color} group-hover:scale-110 group-hover:shadow-neon-cyan-sm transition-all duration-300`}>
-                      <tool.icon className="w-5 h-5" />
-                    </div>
-                    <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-muted/80 text-muted-foreground">
-                      {tool.badge}
-                    </span>
-                  </div>
-                  <h3 className="mt-3 text-sm sm:text-base font-bold group-hover:text-primary transition-colors">
-                    {tool.label}
-                  </h3>
-                  <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                    {tool.description}
-                  </p>
-                </div>
-
-                <div className="mt-3 pt-2.5 border-t border-border/40 flex items-center justify-between text-xs font-mono text-primary">
-                  <span>Open Suite</span>
-                  <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
-                </div>
-              </InteractiveCard>
-            </RevealOnScroll>
-          ))}
-        </div>
-      </div>
-
-      {/* Recent Activity Feed */}
-      <GlassPanel variant="default" className="p-4 sm:p-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 sm:pb-4 border-b border-border/60 gap-2">
-          <div className="flex items-center gap-2">
-            <Clock className="w-4 h-4 text-primary" />
-            <div>
-              <h3 className="font-semibold text-sm sm:text-base">Recent Platform Telemetry</h3>
-              <p className="text-xs text-muted-foreground">Cross-module operational history</p>
-            </div>
-          </div>
-
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={clearAllHistory}
-            disabled={recentActivity.length === 0}
-            className="text-xs text-destructive hover:text-destructive hover:bg-destructive/10 self-end sm:self-auto h-8"
-          >
-            <Trash2 className="w-3.5 h-3.5 mr-1" />
-            Clear Log
-          </Button>
-        </div>
-
-        <div className="mt-4 space-y-2">
-          {recentActivity.length === 0 ? (
-            <EmptyState
-              icon={Shield}
-              title="No Recorded Telemetry"
-              description="Run a vulnerability scan, inspect TLS certificates, or derive cryptographic tokens to generate live activity."
-              actionLabel="Launch Domain Scanner"
-              onAction={() => navigate("/scanner")}
-            />
-          ) : (
-            recentActivity.map((item) => (
-              <div
-                key={item.id}
-                onClick={() => navigate(item.path)}
-                className="flex items-center justify-between p-3 rounded-xl border border-border/40 bg-card/30 hover:bg-card/70 hover:border-primary/30 transition-all cursor-pointer group"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div
-                    className={`p-2 rounded-lg shrink-0 ${
-                      item.type === "scan"
-                        ? "bg-primary/10 text-primary"
-                        : item.type === "websec"
-                        ? "bg-emerald-500/10 text-emerald-400"
-                        : item.type === "email"
-                        ? "bg-amber-500/10 text-amber-400"
-                        : item.type === "crypto"
-                        ? "bg-secondary/15 text-secondary"
-                        : "bg-primary/10 text-primary"
-                    }`}
-                  >
-                    {item.type === "scan" && <Scan className="w-4 h-4" />}
-                    {item.type === "websec" && <Globe className="w-4 h-4" />}
-                    {item.type === "email" && <MailCheck className="w-4 h-4" />}
-                    {item.type === "crypto" && <Lock className="w-4 h-4" />}
-                    {item.type === "research" && <Search className="w-4 h-4" />}
-                    {item.type === "password" && <Key className="w-4 h-4" />}
-                  </div>
-
-                  <div className="min-w-0">
-                    <p className="text-xs sm:text-sm font-semibold group-hover:text-primary transition-colors truncate">
-                      {item.title}
-                    </p>
-                    <p className="text-[11px] text-muted-foreground font-mono truncate">
-                      {item.target}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-                  {typeof item.score === "number" && (
-                    <Badge
-                      variant="outline"
-                      className={`font-mono text-[11px] ${
-                        item.score >= 80
-                          ? "border-emerald-500/40 text-emerald-400 bg-emerald-500/5"
-                          : item.score >= 60
-                          ? "border-amber-500/40 text-amber-400 bg-amber-500/5"
-                          : "border-red-500/40 text-red-400 bg-red-500/5"
-                      }`}
-                    >
-                      {item.score}/100
-                    </Badge>
-                  )}
-                  <span className="text-[11px] text-muted-foreground font-mono hidden sm:inline">
-                    {item.timeLabel}
-                  </span>
-                  <ArrowRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </GlassPanel>
+      {/* Operational Activity Timeline Feed */}
+      <RevealOnScroll direction="up">
+        <ActivityTimeline
+          activities={recentActivities}
+          onClearHistory={clearAllHistory}
+        />
+      </RevealOnScroll>
 
       {/* Stage 5 Executive Defense Report Modal */}
       <ExportReportModal
