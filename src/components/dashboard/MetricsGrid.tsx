@@ -104,7 +104,10 @@ export function MetricsGrid({
                 {stat.label}
               </span>
               <div className={`p-1.5 sm:p-2 rounded-lg ${stat.bgColor} ${stat.color} transition-transform group-hover:scale-110`}>
-                <stat.icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                <stat.icon
+                  className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${stat.id === "stat-crypto" ? "text-white text-[#ffffff]" : ""}`}
+                  style={stat.id === "stat-crypto" ? { color: "#ffffff" } : undefined}
+                />
               </div>
             </div>
 

@@ -175,11 +175,13 @@ export default function CryptoLab() {
 
   const clearHistory = () => {
     if (!history.length) return;
-    if (confirm("Clear crypto history?")) {
+    try {
       localStorage.removeItem(HISTORY_KEY);
-      setHistory([]);
-      toast.success("History cleared");
+    } catch {
+      // ignore
     }
+    setHistory([]);
+    toast.success("Crypto history cleared");
   };
 
   /* ---------------- Export helpers ---------------- */

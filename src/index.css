@@ -686,76 +686,95 @@
   }
 }
 
-/* ── Ambient Background & Cybersecurity Atmosphere Animations ── */
-@keyframes ambient-aurora-cyan {
+/* ── Living Aurora Multi-Curtain Motion Engine ── */
+@keyframes living-aurora-curtain-1 {
   0% {
-    transform: translate3d(-8%, -10%, 0) scale(1);
-    opacity: 0.6;
+    transform: translate3d(0, 0, 0) rotate(-14deg) scale(1, 1);
+    opacity: 0.75;
   }
   25% {
-    transform: translate3d(12%, 4%, 0) scale(1.1);
-    opacity: 0.85;
+    transform: translate3d(12vw, 5vh, 0) rotate(-8deg) scale(1.12, 1.22);
+    opacity: 0.95;
   }
   50% {
-    transform: translate3d(6%, 15%, 0) scale(0.95);
-    opacity: 0.65;
+    transform: translate3d(6vw, 14vh, 0) rotate(-19deg) scale(0.92, 0.95);
+    opacity: 0.78;
   }
   75% {
-    transform: translate3d(-14%, 6%, 0) scale(1.08);
-    opacity: 0.75;
+    transform: translate3d(-10vw, 8vh, 0) rotate(-11deg) scale(1.15, 1.1);
+    opacity: 0.9;
   }
   100% {
-    transform: translate3d(-8%, -10%, 0) scale(1);
-    opacity: 0.6;
+    transform: translate3d(0, 0, 0) rotate(-14deg) scale(1, 1);
+    opacity: 0.75;
   }
 }
 
-@keyframes ambient-aurora-violet {
+@keyframes living-aurora-curtain-2 {
   0% {
-    transform: translate3d(10%, 8%, 0) scale(1);
-    opacity: 0.5;
-  }
-  30% {
-    transform: translate3d(-12%, -10%, 0) scale(1.15);
-    opacity: 0.75;
-  }
-  65% {
-    transform: translate3d(-6%, 14%, 0) scale(0.92);
-    opacity: 0.55;
-  }
-  100% {
-    transform: translate3d(10%, 8%, 0) scale(1);
-    opacity: 0.5;
-  }
-}
-
-@keyframes ambient-aurora-emerald {
-  0% {
-    transform: translate3d(-12%, 10%, 0) scale(0.95);
-    opacity: 0.45;
-  }
-  35% {
-    transform: translate3d(10%, -8%, 0) scale(1.12);
+    transform: translate3d(0, 0, 0) rotate(16deg) scale(1, 1);
     opacity: 0.7;
   }
-  70% {
-    transform: translate3d(-4%, -16%, 0) scale(1.02);
-    opacity: 0.5;
+  30% {
+    transform: translate3d(-14vw, -9vh, 0) rotate(24deg) scale(1.18, 1.15);
+    opacity: 0.92;
+  }
+  65% {
+    transform: translate3d(8vw, 6vh, 0) rotate(10deg) scale(0.9, 0.92);
+    opacity: 0.65;
   }
   100% {
-    transform: translate3d(-12%, 10%, 0) scale(0.95);
-    opacity: 0.45;
+    transform: translate3d(0, 0, 0) rotate(16deg) scale(1, 1);
+    opacity: 0.7;
   }
 }
 
-@keyframes ambient-aurora-core {
+@keyframes living-aurora-curtain-3 {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(-6deg) scale(1, 1);
+    opacity: 0.65;
+  }
+  35% {
+    transform: translate3d(16vw, -8vh, 0) rotate(5deg) scale(1.15, 1.25);
+    opacity: 0.88;
+  }
+  70% {
+    transform: translate3d(-12vw, 10vh, 0) rotate(-14deg) scale(0.94, 0.92);
+    opacity: 0.7;
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(-6deg) scale(1, 1);
+    opacity: 0.65;
+  }
+}
+
+@keyframes living-aurora-curtain-4 {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(-24deg) scale(1, 1);
+    opacity: 0.55;
+  }
+  40% {
+    transform: translate3d(-16vw, 12vh, 0) rotate(-16deg) scale(1.2, 1.1);
+    opacity: 0.85;
+  }
+  75% {
+    transform: translate3d(10vw, -7vh, 0) rotate(-28deg) scale(0.95, 0.98);
+    opacity: 0.6;
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(-24deg) scale(1, 1);
+    opacity: 0.55;
+  }
+}
+
+@keyframes living-star-twinkle {
   0%, 100% {
-    transform: translate(-50%, -50%) scale(1);
-    opacity: 0.35;
+    opacity: 0.25;
+    transform: scale(0.85);
   }
   50% {
-    transform: translate(-50%, -50%) scale(1.16);
-    opacity: 0.58;
+    opacity: 0.85;
+    transform: scale(1.2);
   }
 }
 
@@ -779,34 +798,39 @@
 
 @keyframes ambient-backdrop-shift {
   0%, 100% {
-    background-color: #060911;
+    background-color: #020510;
   }
   33% {
-    background-color: #080a18;
+    background-color: #040816;
   }
   66% {
-    background-color: #050d14;
+    background-color: #030612;
   }
 }
 
-.animate-ambient-cyan {
-  animation: ambient-aurora-cyan 22s ease-in-out infinite;
+.animate-aurora-1 {
+  animation: living-aurora-curtain-1 18s ease-in-out infinite;
   will-change: transform, opacity;
 }
 
-.animate-ambient-violet {
-  animation: ambient-aurora-violet 28s ease-in-out infinite;
+.animate-aurora-2 {
+  animation: living-aurora-curtain-2 23s ease-in-out infinite;
   will-change: transform, opacity;
 }
 
-.animate-ambient-emerald {
-  animation: ambient-aurora-emerald 25s ease-in-out infinite;
+.animate-aurora-3 {
+  animation: living-aurora-curtain-3 29s ease-in-out infinite;
   will-change: transform, opacity;
 }
 
-.animate-ambient-core {
-  animation: ambient-aurora-core 16s ease-in-out infinite;
+.animate-aurora-4 {
+  animation: living-aurora-curtain-4 37s ease-in-out infinite;
   will-change: transform, opacity;
+}
+
+.animate-star-twinkle {
+  animation: living-star-twinkle 6s ease-in-out infinite;
+  will-change: opacity, transform;
 }
 
 .animate-grid-drift {
@@ -823,10 +847,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-ambient-cyan,
-  .animate-ambient-violet,
-  .animate-ambient-emerald,
-  .animate-ambient-core,
+  .animate-aurora-1,
+  .animate-aurora-2,
+  .animate-aurora-3,
+  .animate-aurora-4,
+  .animate-star-twinkle,
   .animate-grid-drift,
   .animate-grid-pulse,
   .animate-backdrop-shift {

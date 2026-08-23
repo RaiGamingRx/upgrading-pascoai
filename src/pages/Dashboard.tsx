@@ -463,16 +463,25 @@ export default function Dashboard() {
   }, [executiveReport]);
 
   const clearAllHistory = () => {
-    if (!confirm("Clear all activity history across all security tools?")) return;
+    const keys = [
+      SCAN_HISTORY_KEY,
+      SCAN_HISTORY_V2_KEY,
+      WEBSEC_HISTORY_KEY,
+      EMAIL_HISTORY_KEY,
+      CRYPTO_HISTORY_KEY,
+      PASSWORD_HISTORY_KEY,
+      "pasco_password_breaches",
+      RESEARCH_HISTORY_KEY,
+      SIMULATIONS_HISTORY_KEY,
+    ];
 
-    localStorage.removeItem(SCAN_HISTORY_KEY);
-    localStorage.removeItem(SCAN_HISTORY_V2_KEY);
-    localStorage.removeItem(WEBSEC_HISTORY_KEY);
-    localStorage.removeItem(EMAIL_HISTORY_KEY);
-    localStorage.removeItem(CRYPTO_HISTORY_KEY);
-    localStorage.removeItem(PASSWORD_HISTORY_KEY);
-    localStorage.removeItem(RESEARCH_HISTORY_KEY);
-    localStorage.removeItem(SIMULATIONS_HISTORY_KEY);
+    keys.forEach((k) => {
+      try {
+        localStorage.removeItem(k);
+      } catch {
+        // ignore
+      }
+    });
 
     setScanHistory([]);
     setWebsecHistory([]);

@@ -48,6 +48,16 @@ export default function EmailSecurity() {
     }
   }, []);
 
+  const clearHistory = () => {
+    try {
+      localStorage.removeItem(HISTORY_KEY);
+    } catch {
+      // ignore
+    }
+    setHistory([]);
+    toast.success("Email audit history cleared");
+  };
+
   async function runScan(targetEmail?: string) {
     const toScan = (targetEmail || email).trim();
     if (!toScan) {
@@ -318,13 +328,8 @@ export default function EmailSecurity() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => {
-                if (confirm("Clear email history?")) {
-                  localStorage.removeItem(HISTORY_KEY);
-                  setHistory([]);
-                  toast.success("History cleared");
-                }
-              }}
+              onClick={clearHistory}
+              disabled={history.length === 0}
               className="text-xs text-destructive hover:text-destructive"
             >
               Clear

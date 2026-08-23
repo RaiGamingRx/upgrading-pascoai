@@ -134,14 +134,39 @@ export default function Settings() {
     toast.success(`Exported (${exportFormat.toUpperCase()})`);
   };
 
+  /* ---------------- CLEAR ALL HISTORY & LOGS ---------------- */
+  const handleClearAllHistory = () => {
+    const keys = [
+      "pasco_scan_history_v1",
+      "pasco_scanner_history_v2",
+      "pasco_websec_history_v1",
+      "pasco_email_history_v1",
+      "pasco_crypto_history_v1",
+      "pasco_crypto_attempts_v1",
+      "pasco_password_history_v1",
+      "pasco_password_breaches",
+      "pasco_research_history_v1",
+      "pasco_simulations_history_v2",
+    ];
+
+    keys.forEach((k) => {
+      try {
+        localStorage.removeItem(k);
+      } catch {
+        // ignore
+      }
+    });
+
+    window.dispatchEvent(new Event("storage"));
+    toast.success("All transaction logs and tool histories cleared");
+  };
+
   /* ---------------- DELETE ACCOUNT ---------------- */
   const handleDeleteAccount = async () => {
     if (isDemo) {
       toast.error("Account deletion disabled in demo mode");
       return;
     }
-
-    if (!confirm("Delete your account permanently? All local sessions will be terminated.")) return;
 
     const res = await deleteAccount();
     if (res.error) {
@@ -365,6 +390,19 @@ export default function Settings() {
           <CardDescription>Irreversible account actions</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-xl bg-card border border-border/80">
+            <div>
+              <p className="font-semibold text-foreground">Clear All Telemetry & Logs</p>
+              <p className="text-xs text-muted-foreground">
+                Purge all stored scan results, audit records, password logs, and simulation histories across all tools.
+              </p>
+            </div>
+            <Button variant="outline" onClick={handleClearAllHistory} className="gap-2 shrink-0 border-destructive/40 text-destructive hover:bg-destructive/10">
+              <Trash2 className="w-4 h-4" />
+              Clear All Logs
+            </Button>
+          </div>
+
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-xl bg-destructive/10 border border-destructive/20">
             <div>
               <p className="font-semibold text-destructive">Delete Account</p>

@@ -51,6 +51,9 @@ function readExportFormat(): ExportFormat {
   }
 }
 
+const PASSWORD_HISTORY_KEY = "pasco_password_history_v1";
+const LEGACY_PASSWORD_KEY = "pasco_password_breaches";
+
 export default function PasswordLab() {
   /* ---------------- Analyzer ---------------- */
   const [password, setPassword] = useState("");
@@ -80,9 +83,31 @@ export default function PasswordLab() {
   const [breachCount, setBreachCount] = useState<number | null>(null);
   const [breachHistory, setBreachHistory] = useState<BreachHistoryItem[]>([]);
 
+  useEffect(() => {
+    try {
+      const raw =
+        localStorage.getItem(PASSWORD_HISTORY_KEY) ||
+        localStorage.getItem(LEGACY_PASSWORD_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setBreachHistory(parsed);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const clearBreachHistory = () => {
+    try {
+      localStorage.removeItem(PASSWORD_HISTORY_KEY);
+      localStorage.removeItem(LEGACY_PASSWORD_KEY);
+    } catch {
+      // ignore
+    }
     setBreachHistory([]);
-    toast.success("History cleared");
+    toast.success("Password breach history cleared");
   };
 
   /* ---------------- Export format (LIVE sync with Settings) ---------------- */
@@ -170,16 +195,22 @@ export default function PasswordLab() {
       setBreachCount(count);
 
       const label = count > 0 ? "Compromised" : "Not found";
-      setBreachHistory((prev) => [
-        {
-          id: crypto.randomUUID(),
-          ts: Date.now(),
-          length: breachPwd.length,
-          foundCount: count,
-          label,
-        },
-        ...prev,
-      ]);
+      const newItem: BreachHistoryItem = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        length: breachPwd.length,
+        foundCount: count,
+        label,
+      };
+      setBreachHistory((prev) => {
+        const updated = [newItem, ...prev].slice(0, 20);
+        try {
+          localStorage.setItem(PASSWORD_HISTORY_KEY, JSON.stringify(updated));
+        } catch {
+          // ignore
+        }
+        return updated;
+      });
 
       if (count > 0) toast.error(`Found in breaches: ${count.toLocaleString()} times`);
       else toast.success("Not found in known breach datasets");

@@ -79,11 +79,13 @@ export default function WebSecurity() {
   }, []);
 
   const clearHistory = () => {
-    if (confirm("Clear Web Security scan history?")) {
+    try {
       localStorage.removeItem(HISTORY_KEY);
-      setHistory([]);
-      toast.success("History cleared");
+    } catch {
+      // ignore
     }
+    setHistory([]);
+    toast.success("Web security history cleared");
   };
 
   async function onScan(targetUrl?: string) {
@@ -471,7 +473,7 @@ export default function WebSecurity() {
               <Clock className="w-4 h-4 text-primary" />
               <h3 className="font-semibold text-sm">Recent Website Audits</h3>
             </div>
-            <Button variant="ghost" size="sm" onClick={clearHistory} className="text-xs text-destructive hover:text-destructive">
+            <Button variant="ghost" size="sm" onClick={clearHistory} disabled={history.length === 0} className="text-xs text-destructive hover:text-destructive">
               Clear
             </Button>
           </div>

@@ -98,6 +98,17 @@ export default function Scanner() {
     }
   }, []);
 
+  const clearScanHistory = () => {
+    try {
+      localStorage.removeItem(HISTORY_KEY);
+      localStorage.removeItem("pasco_scanner_history_v2");
+    } catch {
+      // ignore
+    }
+    setScanHistory([]);
+    toast.success("Scan history cleared");
+  };
+
   const iconMap: Record<string, React.ElementType> = useMemo(
     () => ({
       Eye,
@@ -410,13 +421,8 @@ export default function Scanner() {
                 variant="ghost"
                 size="sm"
                 className="text-xs text-destructive hover:text-destructive"
-                onClick={() => {
-                  if (confirm("Clear domain scan history?")) {
-                    localStorage.removeItem(HISTORY_KEY);
-                    setScanHistory([]);
-                    toast.success("Scan history cleared");
-                  }
-                }}
+                onClick={clearScanHistory}
+                disabled={scanHistory.length === 0}
               >
                 Clear
               </Button>
