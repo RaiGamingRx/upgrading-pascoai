@@ -8,6 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PasswordStrengthMeter } from "@/components/PasswordStrengthMeter";
+import { PageTransition } from "@/components/motion/PageTransition";
+import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
 import { toast } from "sonner";
 import {
   Key,
@@ -240,14 +242,17 @@ export default function PasswordLab() {
   };
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-gradient-cyber">Password Security Lab</h1>
-        <p className="text-muted-foreground mt-1">
-          100% real tools: strength analyzer, secure generator, and breach checker (k-anonymity).
-        </p>
-      </div>
+    <PageTransition className="space-y-6 max-w-5xl">
+      {/* Animated Header */}
+      <AnimatedPageHeading
+        title="Password Security Lab"
+        subtitle="Cryptographic entropy analysis, CSPRNG password generation, and k-anonymity breach verification."
+        badgeText="K-ANONYMITY SHA-1"
+        badgeVariant="emerald"
+        statusText="Zero-Knowledge Engine"
+        statusColor="emerald"
+        icon={Key}
+      />
 
       <Tabs defaultValue="analyzer" className="space-y-6">
         <TabsList className="grid w-full grid-cols-3">
@@ -637,6 +642,6 @@ export default function PasswordLab() {
           </Card>
         </TabsContent>
       </Tabs>
-    </div>
+    </PageTransition>
   );
 }

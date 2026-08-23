@@ -7,6 +7,8 @@ import { GlassPanel } from "@/components/motion/GlassPanel";
 import { SecurityGauge } from "@/components/security/SecurityGauge";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { RevealOnScroll } from "@/components/motion/RevealOnScroll";
+import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
+import { CountUp } from "@/components/motion/CountUp";
 import { EmptyState } from "@/components/ui/EmptyState";
 import {
   Shield,
@@ -24,8 +26,10 @@ import {
   Trash2,
   Cpu,
   Layers,
+  FileText,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ExportReportModal } from "@/components/security/ExportReportModal";
 
 /* -------------------- Storage Keys across all PascoAI suites -------------------- */
 const SCAN_HISTORY_KEY = "pasco_scan_history_v1";
@@ -132,13 +136,14 @@ const quickActionTools = [
 export default function Dashboard() {
   const navigate = useNavigate();
 
-  const [scanHistory, setScanHistory] = useState<any[]>([]);
-  const [websecHistory, setWebsecHistory] = useState<any[]>([]);
-  const [emailHistory, setEmailHistory] = useState<any[]>([]);
-  const [cryptoHistory, setCryptoHistory] = useState<any[]>([]);
-  const [passwordHistory, setPasswordHistory] = useState<any[]>([]);
-  const [researchHistory, setResearchHistory] = useState<any[]>([]);
-  const [simHistory, setSimHistory] = useState<any[]>([]);
+  const [scanHistory, setScanHistory] = useState<Record<string, unknown>[]>([]);
+  const [websecHistory, setWebsecHistory] = useState<Record<string, unknown>[]>([]);
+  const [emailHistory, setEmailHistory] = useState<Record<string, unknown>[]>([]);
+  const [cryptoHistory, setCryptoHistory] = useState<Record<string, unknown>[]>([]);
+  const [passwordHistory, setPasswordHistory] = useState<Record<string, unknown>[]>([]);
+  const [researchHistory, setResearchHistory] = useState<Record<string, unknown>[]>([]);
+  const [simHistory, setSimHistory] = useState<Record<string, unknown>[]>([]);
+  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
 
   useEffect(() => {
     setScanHistory(safeJson(localStorage.getItem(SCAN_HISTORY_KEY), []));
@@ -286,48 +291,41 @@ export default function Dashboard() {
 
   return (
     <PageTransition className="space-y-6 sm:space-y-8" data-tour="dashboard">
-      {/* Header Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
-        <div>
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-gradient-cyber tracking-tight">
-              Security Command Center
-            </h1>
-            <Badge variant="outline" className="border-primary/40 text-primary font-mono text-[11px] bg-primary/10">
-              LIVE TELEMETRY
-            </Badge>
-          </div>
-          <p className="text-muted-foreground mt-1 text-xs sm:text-sm">
-            Unified threat intelligence, live network inspection, cryptography & simulation suites.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2 self-start sm:self-auto">
-          <Badge
+      {/* Animated Header Banner */}
+      <AnimatedPageHeading
+        title="Security Command Center"
+        subtitle="Unified threat intelligence, live network inspection, cryptography & simulation suites."
+        badgeText="LIVE TELEMETRY"
+        badgeVariant="cyan"
+        statusText={metrics.systemStatus === "operational" ? "All Systems Operational" : "Action Required"}
+        statusColor={metrics.systemStatus === "operational" ? "emerald" : "amber"}
+        icon={Shield}
+        actions={
+          <Button
             variant="outline"
-            className={`py-1 px-2.5 sm:px-3 text-xs flex items-center gap-1.5 ${
-              metrics.systemStatus === "operational"
-                ? "border-emerald-500/40 text-emerald-400 bg-emerald-500/10"
-                : "border-amber-500/40 text-amber-400 bg-amber-500/10"
-            }`}
+            size="sm"
+            onClick={() => setIsReportModalOpen(true)}
+            className="text-xs font-mono border-primary/30 hover:border-primary/60 text-primary bg-primary/5 hover:bg-primary/10 shadow-[0_0_12px_rgba(34,211,238,0.12)] active:scale-95 transition-all"
           >
-            <Activity className="w-3.5 h-3.5 animate-pulse" />
-            <span>{metrics.systemStatus === "operational" ? "All Systems Operational" : "Action Required"}</span>
-          </Badge>
-        </div>
-      </div>
+            <FileText className="w-3.5 h-3.5 mr-1.5 text-primary" />
+            <span>Export Executive Briefing</span>
+          </Button>
+        }
+      />
 
       {/* Top Overview Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6">
         {/* Left: Overall Health Dial */}
         <RevealOnScroll direction="scale" className="lg:col-span-4 h-full">
-          <InteractiveCard glowColor="cyan" className="p-6 flex flex-col items-center justify-center h-full min-h-[220px]">
-            <SecurityGauge score={metrics.avgScore} size="lg" label="Defense Score" />
-            <div className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground font-mono">
-              <TrendingUp className="w-3.5 h-3.5 text-primary" />
-              <span>Aggregated posture rating</span>
-            </div>
-          </InteractiveCard>
+          <div data-tour="defense-gauge" className="h-full">
+            <InteractiveCard glowColor="cyan" className="p-6 flex flex-col items-center justify-center h-full min-h-[220px]">
+              <SecurityGauge score={metrics.avgScore} size="lg" label="Defense Score" />
+              <div className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground font-mono">
+                <TrendingUp className="w-3.5 h-3.5 text-primary" />
+                <span>Aggregated posture rating</span>
+              </div>
+            </InteractiveCard>
+          </div>
         </RevealOnScroll>
 
         {/* Right: Key Stat Cards */}
@@ -343,7 +341,9 @@ export default function Dashboard() {
                 </div>
               </div>
               <div className="mt-3 sm:mt-4">
-                <span className="text-2xl sm:text-3xl font-bold font-mono text-primary">{metrics.totalScans}</span>
+                <span className="text-2xl sm:text-3xl font-bold font-mono text-primary">
+                  <CountUp end={metrics.totalScans} />
+                </span>
                 <p className="text-[11px] text-muted-foreground mt-0.5">Domains & headers</p>
               </div>
             </InteractiveCard>
@@ -360,7 +360,9 @@ export default function Dashboard() {
                 </div>
               </div>
               <div className="mt-3 sm:mt-4">
-                <span className="text-2xl sm:text-3xl font-bold font-mono text-secondary">{metrics.cryptoCount}</span>
+                <span className="text-2xl sm:text-3xl font-bold font-mono text-secondary">
+                  <CountUp end={metrics.cryptoCount} />
+                </span>
                 <p className="text-[11px] text-muted-foreground mt-0.5">AES-256 tokens</p>
               </div>
             </InteractiveCard>
@@ -377,7 +379,9 @@ export default function Dashboard() {
                 </div>
               </div>
               <div className="mt-3 sm:mt-4">
-                <span className="text-2xl sm:text-3xl font-bold font-mono text-emerald-400">{metrics.researchCount}</span>
+                <span className="text-2xl sm:text-3xl font-bold font-mono text-emerald-400">
+                  <CountUp end={metrics.researchCount} />
+                </span>
                 <p className="text-[11px] text-muted-foreground mt-0.5">Threat reports</p>
               </div>
             </InteractiveCard>
@@ -408,7 +412,7 @@ export default function Dashboard() {
       </div>
 
       {/* Quick Launchpad */}
-      <div>
+      <div data-tour="security-suites">
         <div className="flex items-center justify-between mb-3 sm:mb-4">
           <h2 className="text-base sm:text-lg font-bold tracking-tight flex items-center gap-2 text-foreground">
             <Layers className="w-4 h-4 text-primary" />
@@ -548,6 +552,12 @@ export default function Dashboard() {
           )}
         </div>
       </GlassPanel>
+
+      {/* Stage 5 Executive Defense Report Modal */}
+      <ExportReportModal
+        isOpen={isReportModalOpen}
+        onClose={() => setIsReportModalOpen(false)}
+      />
     </PageTransition>
   );
 }

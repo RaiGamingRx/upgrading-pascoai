@@ -130,8 +130,10 @@ function certificateState(cert: tls.PeerCertificate) {
   const validFrom = new Date(cert.valid_from);
   const validTo = new Date(cert.valid_to);
   const now = Date.now();
+  const rawIssuer = cert.issuer?.O || cert.issuer?.CN || "Unknown";
+  const issuer = Array.isArray(rawIssuer) ? rawIssuer.join(", ") : String(rawIssuer);
   return {
-    issuer: cert.issuer?.O || cert.issuer?.CN || "Unknown",
+    issuer,
     validFrom: cert.valid_from,
     validTo: cert.valid_to,
     expired: validTo.getTime() < now,

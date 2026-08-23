@@ -9,6 +9,7 @@ import { InteractiveCard } from "@/components/motion/InteractiveCard";
 import { GlassPanel } from "@/components/motion/GlassPanel";
 import { SecurityGauge } from "@/components/security/SecurityGauge";
 import { PageTransition } from "@/components/motion/PageTransition";
+import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
 import {
   Mail,
   MailCheck,
@@ -121,18 +122,16 @@ export default function EmailSecurity() {
 
   return (
     <PageTransition className="space-y-6 max-w-5xl">
-      {/* Header */}
-      <div>
-        <div className="flex items-center gap-3">
-          <h1 className="text-3xl font-bold text-gradient-cyber">Email & Phishing Intelligence</h1>
-          <Badge variant="outline" className="border-cyan-500/30 text-cyan-400 font-mono text-xs">
-            LIVE DNS AUDIT
-          </Badge>
-        </div>
-        <p className="text-muted-foreground mt-1 text-sm">
-          Verify domain MX delivery records, SPF/DMARC anti-spoofing policies, disposable mailbox blacklists, and phishing keywords.
-        </p>
-      </div>
+      {/* Animated Header */}
+      <AnimatedPageHeading
+        title="Email & Phishing Intelligence"
+        subtitle="Verify domain MX delivery records, SPF/DMARC anti-spoofing policies, disposable mailbox blacklists, and phishing keywords."
+        badgeText="LIVE DNS AUDIT"
+        badgeVariant="cyan"
+        statusText={loading ? "Verifying MX & SPF Records..." : "Intelligence Ready"}
+        statusColor={loading ? "amber" : "emerald"}
+        icon={MailCheck}
+      />
 
       {/* Target Input */}
       <GlassPanel variant="cyber">

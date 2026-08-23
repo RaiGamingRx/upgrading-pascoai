@@ -1,6 +1,6 @@
 import { useMemo } from "react";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { CountUp } from "@/components/motion/CountUp";
 
 interface SecurityGaugeProps {
   score: number; // 0 - 100
@@ -69,9 +69,9 @@ export function SecurityGauge({
   return (
     <div className={cn("flex flex-col items-center justify-center text-center", className)}>
       <div className="relative flex items-center justify-center" style={{ width: dim, height: dim }}>
-        {/* Glow backdrop */}
+        {/* Glow backdrop with subtle breathing animation */}
         <div
-          className="absolute inset-2 rounded-full blur-xl opacity-20 transition-all duration-700"
+          className="absolute inset-2 rounded-full blur-xl opacity-25 transition-all duration-700 pointer-events-none"
           style={{ background: glowColor }}
         />
 
@@ -99,15 +99,15 @@ export function SecurityGauge({
             strokeLinecap="round"
             fill="transparent"
             style={{
-              transition: "stroke-dashoffset 1s ease-in-out, stroke 0.5s ease",
+              transition: "stroke-dashoffset 1s cubic-bezier(0.16, 1, 0.3, 1), stroke 0.5s ease",
             }}
           />
         </svg>
 
         {/* Center score readout */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className={cn("font-bold tracking-tight", colorClass, size === "sm" ? "text-lg" : size === "lg" ? "text-3xl" : "text-2xl")}>
-            {clamped}
+        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+          <span className={cn("font-bold tracking-tight font-mono", colorClass, size === "sm" ? "text-lg" : size === "lg" ? "text-3xl" : "text-2xl")}>
+            <CountUp end={clamped} duration={1200} />
           </span>
           {showGrade && size !== "sm" && (
             <span className="text-[10px] uppercase font-mono tracking-widest text-muted-foreground mt-0.5">

@@ -446,9 +446,129 @@
       display: none !important;
     }
   }
+  /* ── Sidebar Motion Engine (PascoAI Stage 2) ── */
+  .sidebar-smooth-transition {
+    transition: width 320ms cubic-bezier(0.16, 1, 0.3, 1),
+                transform 300ms cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: width, transform;
+  }
+
+  .sidebar-item-transition {
+    transition: background-color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+                border-color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+                color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+                transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+                box-shadow 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .sidebar-nav-entry {
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
+                transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .sidebar-item-glow {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .sidebar-item-glow::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: radial-gradient(80px circle at var(--mouse-x, 50%) var(--mouse-y, 50%), rgba(34, 211, 238, 0.08), transparent 70%);
+    opacity: 0;
+    transition: opacity 200ms ease-out;
+    pointer-events: none;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .sidebar-item-glow:hover::before {
+      opacity: 1;
+    }
+  }
+
+  .sidebar-brand-breath {
+    animation: brand-breath 3.6s ease-in-out infinite;
+  }
+
+  .sidebar-guard-pulse {
+    animation: guard-pulse 3.2s ease-in-out infinite;
+  }
+
+  /* Command-grade Radix Tooltip Animation */
+  .command-tooltip-animate {
+    animation-duration: 160ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* ── Mobile Command Dock & Drawer Dynamics (PascoAI Stage 3) ── */
+  .mobile-dock-surface {
+    background: rgba(9, 13, 22, 0.94);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow: 0 16px 36px -4px rgba(0, 0, 0, 0.85),
+                0 0 0 1px rgba(34, 211, 238, 0.05),
+                0 0 20px -2px rgba(34, 211, 238, 0.08);
+  }
+
+  .mobile-capsule-indicator {
+    transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
+                opacity 180ms cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: transform;
+  }
+
+  .mobile-touch-press {
+    transition: transform 100ms cubic-bezier(0.16, 1, 0.3, 1),
+                background-color 100ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .mobile-touch-press:active {
+    transform: scale(0.95);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar-smooth-transition,
+    .sidebar-item-transition,
+    .sidebar-nav-entry,
+    .command-tooltip-animate,
+    .mobile-capsule-indicator,
+    .mobile-touch-press {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+    }
+    .sidebar-brand-breath,
+    .sidebar-guard-pulse,
+    .sidebar-item-glow::before {
+      animation: none !important;
+    }
+  }
 }
 
 /* Keyframes referenced in @layer components */
+@keyframes brand-breath {
+  0%, 100% {
+    filter: drop-shadow(0 0 3px rgba(34, 211, 238, 0.25));
+    opacity: 0.92;
+  }
+  50% {
+    filter: drop-shadow(0 0 7px rgba(34, 211, 238, 0.5));
+    opacity: 1;
+  }
+}
+
+@keyframes guard-pulse {
+  0%, 100% {
+    opacity: 0.85;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
 @keyframes shimmer-subtle {
   0%   { background-position: -400% 0; }
   100% { background-position: 400% 0; }
@@ -473,4 +593,161 @@
 @keyframes nav-indicator {
   from { opacity: 0; transform: translateY(-50%) scaleY(0.5); }
   to   { opacity: 1; transform: translateY(-50%) scaleY(1); }
+}
+
+@keyframes gradient-shift {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes radar-sweep {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ping-ring {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes float-subtle {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes border-shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+@keyframes aurora {
+  0%, 100% {
+    opacity: 0.45;
+    transform: scale(1) translate(0%, 0%);
+  }
+  50% {
+    opacity: 0.75;
+    transform: scale(1.06) translate(2%, -2%);
+  }
+}
+
+.animate-gradient-shift {
+  animation: gradient-shift 8s ease infinite;
+  background-size: 200% 200%;
+}
+
+.animate-radar-sweep {
+  animation: radar-sweep 4s linear infinite;
+}
+
+.animate-ping-ring {
+  animation: ping-ring 2.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+.animate-float-subtle {
+  animation: float-subtle 4s ease-in-out infinite;
+}
+
+.animate-border-shimmer {
+  animation: border-shimmer 3s linear infinite;
+  background-size: 200% 100%;
+}
+
+.animate-aurora {
+  animation: aurora 8s ease-in-out infinite;
+}
+
+
+/* ── Enterprise Print Stylesheet ── */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    font-size: 12pt;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Hide app navigation, fixed headers, interactive tools, and non-printable elements */
+  nav,
+  aside,
+  header,
+  .no-print,
+  [data-tour],
+  .fixed:not([role="dialog"]),
+  button:not(.print-keep) {
+    display: none !important;
+  }
+
+  /* Expand print report modal to full page */
+  [role="dialog"] {
+    position: static !important;
+    inset: auto !important;
+    background: transparent !important;
+    padding: 0 !important;
+    display: block !important;
+  }
+
+  .print-report-container {
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  .print-report-container * {
+    color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+  }
+
+  /* Prevent awkward page breaks inside finding cards */
+  .break-inside-avoid {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* High-contrast borders for monochrome and color print */
+  .print-report-container .border {
+    border-color: #cbd5e1 !important;
+  }
+
+  .print-report-container .bg-card\/40,
+  .print-report-container .bg-\[\#090e18\]\/60 {
+    background-color: #f8fafc !important;
+  }
+
+  .print-report-container pre {
+    background-color: #0f172a !important;
+    color: #38bdf8 !important;
+  }
 }

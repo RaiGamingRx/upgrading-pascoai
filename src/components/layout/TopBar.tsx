@@ -9,7 +9,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Command, LogOut, Settings, Menu, Shield, Activity } from "lucide-react";
+import { Command, LogOut, Settings, Menu, Shield, Activity, Compass } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -52,34 +52,19 @@ export function TopBar({
       data-tour="topbar"
       className="h-16 bg-card/70 backdrop-blur-xl border-b border-border/70 flex items-center justify-between px-3 sm:px-6 sticky top-0 z-30 transition-all"
     >
-      {/* LEFT: Menu button & Search */}
+      {/* LEFT: Mobile Brand & Search */}
       <div className="flex items-center gap-3">
-        {showMenuButton && (
-          <Button
-            data-tour="hamburger"
-            variant="ghost"
-            size="icon"
-            onClick={() => {
-              onMenuClick();
-              window.dispatchEvent(new Event("tour:menu-opened"));
-            }}
-            className="text-muted-foreground hover:text-foreground md:hidden"
-            aria-label="Toggle navigation menu"
-          >
-            <Menu className="w-5 h-5" />
-          </Button>
-        )}
-
-        {/* Mobile Brand (visible when sidebar is hidden on mobile) */}
+        {/* Mobile Brand (visible on mobile viewports) */}
         <div className="flex md:hidden items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-primary to-secondary flex items-center justify-center shadow-neon-cyan-sm">
-            <Shield className="w-4 h-4 text-primary-foreground" />
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#121927] to-[#0d1320] flex items-center justify-center border border-cyan-500/30 shadow-[0_0_10px_rgba(34,211,238,0.2)]">
+            <Shield className="w-4 h-4 text-cyan-400" />
           </div>
-          <span className="font-bold text-base text-gradient-cyber">PascoAI</span>
+          <span className="font-bold text-base font-mono tracking-wider text-foreground">PascoAI</span>
         </div>
 
         {/* Command palette search trigger (desktop & tablet) */}
         <Button
+          data-tour="command-search"
           variant="outline"
           className="hidden sm:flex items-center gap-2 text-muted-foreground w-48 lg:w-64 border-border/60 bg-card/40 hover:bg-card/80 hover:text-foreground hover:border-primary/40 transition-all text-xs lg:text-sm h-9"
           onClick={() => {
@@ -97,13 +82,26 @@ export function TopBar({
       {/* RIGHT: System telemetry badge + Demo Indicator + User Profile */}
       <div className="flex items-center gap-2 sm:gap-3">
         {/* Live Protection Status Indicator (laptop/desktop) */}
-        <div className="hidden lg:flex items-center gap-2 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-mono">
-          <Activity className="w-3.5 h-3.5 animate-pulse text-emerald-400" />
-          <span>Active Guard</span>
+        <div data-tour="guard-status" className="flex items-center gap-2">
+          <div className="hidden lg:flex items-center gap-2 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-mono">
+            <Activity className="w-3.5 h-3.5 animate-pulse text-emerald-400" />
+            <span>Active Guard</span>
+          </div>
+
+          {/* Demo Mode Badge */}
+          {isDemo && (
+            <div className="relative">
+              <span className="absolute -inset-0.5 rounded-full bg-primary/40 blur-xs animate-pulse" />
+              <span className="relative px-2.5 py-0.5 text-[11px] font-mono font-bold rounded-full bg-primary text-primary-foreground shadow-neon-cyan-sm">
+                DEMO
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Mobile Command Palette Trigger Icon */}
         <Button
+          data-tour="command-btn"
           variant="ghost"
           size="iconSm"
           className="sm:hidden text-muted-foreground hover:text-primary"
@@ -113,22 +111,13 @@ export function TopBar({
           <Command className="w-4 h-4" />
         </Button>
 
-        {/* Demo Mode Badge */}
-        {isDemo && (
-          <div className="relative">
-            <span className="absolute -inset-0.5 rounded-full bg-primary/40 blur-xs animate-pulse" />
-            <span className="relative px-2.5 py-0.5 text-[11px] font-mono font-bold rounded-full bg-primary text-primary-foreground shadow-neon-cyan-sm">
-              DEMO
-            </span>
-          </div>
-        )}
-
         {/* User Profile Menu */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
+              data-tour="user-profile"
               variant="ghost"
-              className="relative h-9 w-9 sm:h-10 sm:w-10 rounded-full ring-2 ring-primary/20 hover:ring-primary/40 transition-all p-0"
+              className="relative h-9 w-9 sm:h-10 sm:w-10 rounded-full ring-2 ring-primary/20 hover:ring-primary/40 transition-all p-0 cursor-pointer"
             >
               <Avatar className="h-full w-full">
                 <AvatarFallback className="bg-gradient-to-br from-primary/20 to-secondary/20 text-primary font-bold text-xs sm:text-sm">
@@ -151,6 +140,16 @@ export function TopBar({
             </DropdownMenuLabel>
 
             <DropdownMenuSeparator className="bg-border/60" />
+
+            <DropdownMenuItem
+              onClick={() => {
+                window.dispatchEvent(new Event("start-app-tour"));
+              }}
+              className="cursor-pointer text-xs sm:text-sm text-primary font-medium"
+            >
+              <Compass className="mr-2 h-4 w-4 text-primary" />
+              <span>Take Product Tour</span>
+            </DropdownMenuItem>
 
             <DropdownMenuItem
               onClick={() => navigate("/settings")}

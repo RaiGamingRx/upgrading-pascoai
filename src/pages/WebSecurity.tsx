@@ -10,6 +10,7 @@ import { InteractiveCard } from "@/components/motion/InteractiveCard";
 import { GlassPanel } from "@/components/motion/GlassPanel";
 import { SecurityGauge } from "@/components/security/SecurityGauge";
 import { PageTransition } from "@/components/motion/PageTransition";
+import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
 import {
   Globe,
   Lock,
@@ -164,18 +165,16 @@ export default function WebSecurity() {
 
   return (
     <PageTransition className="space-y-6 max-w-6xl">
-      {/* Header */}
-      <div>
-        <div className="flex items-center gap-3">
-          <h1 className="text-3xl font-bold text-gradient-cyber">Web Security Scanner Suite</h1>
-          <Badge variant="outline" className="border-cyan-500/30 text-cyan-400 font-mono text-xs">
-            LIVE PROTOCOL PROBE
-          </Badge>
-        </div>
-        <p className="text-muted-foreground mt-1 text-sm">
-          Inspect HTTP security headers, TLS peer certificates, DNS infrastructure records, and cookie safety attributes.
-        </p>
-      </div>
+      {/* Animated Header */}
+      <AnimatedPageHeading
+        title="Web Security Scanner Suite"
+        subtitle="Inspect HTTP security headers, TLS peer certificates, DNS infrastructure records, and cookie safety attributes."
+        badgeText="LIVE PROTOCOL PROBE"
+        badgeVariant="cyan"
+        statusText={loading ? "Protocol Handshake in Progress" : "Inspector Ready"}
+        statusColor={loading ? "amber" : "emerald"}
+        icon={Globe}
+      />
 
       {/* Target Input */}
       <GlassPanel variant="cyber">

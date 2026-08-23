@@ -47,7 +47,7 @@ export function MainLayout() {
   };
 
   return (
-    <div className="min-h-screen bg-background relative selection:bg-primary/25 selection:text-foreground">
+    <div className="min-h-screen min-h-[100dvh] bg-background relative selection:bg-primary/25 selection:text-foreground">
       {/* Ambient background and cursor aura */}
       <AnimatedBackground showGrid={true} intensity="normal" />
       <CursorGlow />
@@ -62,7 +62,7 @@ export function MainLayout() {
       {/* Main Content Area */}
       <div
         className={cn(
-          "transition-all duration-300 relative z-10 flex flex-col min-h-screen",
+          "transition-[margin] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] relative z-10 flex flex-col min-h-screen min-h-[100dvh]",
           sidebarOpen && !isMobile ? "ml-64" : "ml-0 md:ml-16"
         )}
       >
@@ -73,8 +73,8 @@ export function MainLayout() {
           onLogout={handleLogout}
         />
 
-        {/* Content with responsive spacing (adds bottom padding on mobile for BottomNav) */}
-        <main className="flex-1 p-3 sm:p-5 md:p-6 lg:p-8 pb-20 md:pb-8 max-w-7xl mx-auto w-full">
+        {/* Content with responsive spacing (adds bottom padding on mobile for floating BottomNav) */}
+        <main className="flex-1 p-3 sm:p-5 md:p-6 lg:p-8 pb-[calc(env(safe-area-inset-bottom,0px)+5rem)] md:pb-8 max-w-7xl mx-auto w-full">
           <Outlet />
         </main>
 

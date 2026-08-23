@@ -17,7 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Download, Shield, Trash2, User, LogOut, AlertTriangle, Key } from "lucide-react";
+import { Download, Shield, Trash2, User, LogOut, AlertTriangle, Key, Compass, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { useNavigate } from "react-router-dom";
@@ -313,6 +313,43 @@ export default function Settings() {
             </Button>
             <Button variant="outline" size="sm" onClick={() => exportData("persona")}>
               Export Persona
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Interactive App Tour */}
+      <Card variant="cyber">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Compass className="w-5 h-5 text-primary" />
+            Interactive Product Tour
+          </CardTitle>
+          <CardDescription>
+            Walk through the core cyber defense suites, telemetry indicators, and command shortcuts
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-xl bg-card border border-border/80">
+            <div>
+              <p className="font-semibold text-foreground text-sm">Feature Tour & Onboarding</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Replay the guided spotlight walkthrough across navigation, security gauges, and analysis tools.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => {
+                navigate("/dashboard");
+                setTimeout(() => {
+                  window.dispatchEvent(new Event("start-app-tour"));
+                }, 300);
+                toast.success("Starting App Tour...");
+              }}
+              className="gap-2 shrink-0 border-primary/40 text-primary hover:bg-primary/10 hover:border-primary"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Replay App Tour
             </Button>
           </div>
         </CardContent>

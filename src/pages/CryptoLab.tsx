@@ -9,6 +9,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
+import { PageTransition } from "@/components/motion/PageTransition";
+import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
 import {
   Lock,
   Unlock,
@@ -454,14 +456,17 @@ export default function CryptoLab() {
   }
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-gradient-cyber">Crypto Lab</h1>
-        <p className="text-muted-foreground mt-1">
-          Real, client-side encryption with shareable tokens (AES-256-GCM). Only the correct key can decrypt.
-        </p>
-      </div>
+    <PageTransition className="space-y-6 max-w-5xl">
+      {/* Animated Header */}
+      <AnimatedPageHeading
+        title="Crypto Lab"
+        subtitle="Real, client-side encryption with shareable tokens (AES-256-GCM). Only the correct key can decrypt."
+        badgeText="WEBCRYPTO API"
+        badgeVariant="purple"
+        statusText="Hardware Acceleration Active"
+        statusColor="purple"
+        icon={Lock}
+      />
 
       <Tabs defaultValue="encrypt" className="space-y-6">
         <TabsList className="grid w-full grid-cols-3">
@@ -875,6 +880,6 @@ export default function CryptoLab() {
           </Card>
         </TabsContent>
       </Tabs>
-    </div>
+    </PageTransition>
   );
 }

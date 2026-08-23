@@ -1,40 +1,68 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
 import { useLocation } from "react-router-dom";
+import {
+  Compass,
+  ArrowRight,
+  ArrowLeft,
+  X,
+  Sparkles,
+  Command,
+  Activity,
+  ShieldCheck,
+  Layers,
+  Settings,
+} from "lucide-react";
 
-type FocusMode = "full" | "exact" | "viewport";
 type LayoutMode = "desktop" | "mobile";
 
 interface TourStep {
   key: string;
   selector: string;
+  fallbackSelector?: string;
   title: string;
-  text: string;
-  focus: FocusMode;
+  description: string;
+  icon: React.ComponentType<{ className?: string }>;
+  preferredPlacement?: "bottom" | "top" | "left" | "right" | "auto";
+  spotlightPadding?: number;
+  borderRadius?: number;
   waitForEvent?: string;
   waitTimeout?: number;
 }
 
-interface TooltipPosition {
-  top: number;
-  left: number;
+interface SpotlightRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  radius: number;
 }
 
-let activeTour = false;
+interface TooltipCoords {
+  top: number;
+  left: number;
+  placement: "top" | "bottom" | "left" | "right";
+  arrowOffset: number;
+}
 
-const MOBILE_BREAKPOINT = 768;
-const TOOLTIP_DESKTOP_WIDTH = 320;
-const TOOLTIP_MOBILE_MAX_WIDTH = 340;
+const STORAGE_KEY = "pasco_tour_completed";
+const SKIPPED_KEY = "pasco_tour_skipped";
+const TOOLTIP_DESKTOP_WIDTH = 340;
+const TOOLTIP_MOBILE_WIDTH_OFFSET = 24; // 12px margin on each side
 const VIEWPORT_PADDING = 12;
 const TOOLTIP_GAP = 12;
-const TOOLTIP_ESTIMATED_HEIGHT = 150;
 
 function isUsableElement(el: Element | null): el is HTMLElement {
   if (!(el instanceof HTMLElement)) return false;
   const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none") {
+  if (
+    style.display === "none" ||
+    style.visibility === "hidden" ||
+    style.opacity === "0" ||
+    style.pointerEvents === "none"
+  ) {
     return false;
   }
   if (el.getAttribute("aria-hidden") === "true") return false;
@@ -43,16 +71,18 @@ function isUsableElement(el: Element | null): el is HTMLElement {
 }
 
 function findVisible(selector: string): HTMLElement | null {
-  const matches = Array.from(document.querySelectorAll(selector));
-  return matches.find(isUsableElement) ?? null;
+  try {
+    const matches = Array.from(document.querySelectorAll(selector));
+    return matches.find(isUsableElement) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function getLayoutMode(): LayoutMode {
-  // Prefer the actual visible mobile control over a hard-coded device/model check.
+  if (typeof window === "undefined") return "desktop";
   if (findVisible("[data-tour='hamburger']")) return "mobile";
-  return window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`).matches
-    ? "mobile"
-    : "desktop";
+  return window.innerWidth < 768 ? "mobile" : "desktop";
 }
 
 export function AppTour() {
@@ -60,171 +90,271 @@ export function AppTour() {
   const location = useLocation();
   const prefersReducedMotion = useReducedMotion();
 
-  const [step, setStep] = useState(0);
   const [open, setOpen] = useState(false);
-  const [layout, setLayout] = useState<LayoutMode>(() =>
-    typeof window === "undefined" ? "desktop" : getLayoutMode()
-  );
-  const [target, setTarget] = useState<HTMLElement | null>(null);
-  const [tooltipPos, setTooltipPos] = useState<TooltipPosition>({ top: 16, left: 16 });
+  const [stepIndex, setStepIndex] = useState(0);
+  const [layout, setLayout] = useState<LayoutMode>(getLayoutMode);
+  const [targetElement, setTargetElement] = useState<HTMLElement | null>(null);
+  const [spotlight, setSpotlight] = useState<SpotlightRect | null>(null);
+  const [tooltipCoords, setTooltipCoords] = useState<TooltipCoords>({
+    top: 100,
+    left: 20,
+    placement: "bottom",
+    arrowOffset: 20,
+  });
 
-  const startedRef = useRef(false);
   const eventTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const repositionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastLayoutRef = useRef(layout);
+  const initialTriggerRef = useRef(false);
 
-  const steps = useMemo<TourStep[]>(
-    () =>
-      layout === "mobile"
-        ? [
-            {
-              key: "hamburger",
-              selector: "[data-tour='hamburger']",
-              title: "Open Menu",
-              text: "Tap here to open the navigation menu.",
-              focus: "exact",
-              waitForEvent: "tour:menu-opened",
-              waitTimeout: 5000,
-            },
-            {
-              key: "sidebar",
-              selector: "[data-tour='sidebar']",
-              title: "Navigation",
-              text: "Use the menu to access all security tools.",
-              focus: "full",
-            },
-            {
-              key: "topbar",
-              selector: "[data-tour='topbar']",
-              title: "Top Bar",
-              text: "Profile, demo mode, and quick actions live here.",
-              focus: "exact",
-            },
-            {
-              key: "dashboard",
-              selector: "[data-tour='dashboard']",
-              title: "Dashboard",
-              text: "Your security overview and recent activity.",
-              focus: "viewport",
-            },
-          ]
-        : [
-            {
-              key: "sidebar",
-              selector: "[data-tour='sidebar']",
-              title: "Navigation",
-              text: "Use the sidebar to access all security tools.",
-              focus: "full",
-            },
-            {
-              key: "topbar",
-              selector: "[data-tour='topbar']",
-              title: "Quick Access",
-              text: "Profile, demo mode, and quick actions live here.",
-              focus: "exact",
-            },
-            {
-              key: "dashboard",
-              selector: "[data-tour='dashboard']",
-              title: "Dashboard",
-              text: "Your security overview and recent activity.",
-              focus: "viewport",
-            },
-          ],
-    [layout]
-  );
-
-  const clearTimers = useCallback(() => {
-    if (eventTimerRef.current) clearTimeout(eventTimerRef.current);
-    if (repositionTimerRef.current) clearTimeout(repositionTimerRef.current);
-    eventTimerRef.current = null;
-    repositionTimerRef.current = null;
-  }, []);
-
-  const finish = useCallback(() => {
-    clearTimers();
-    setOpen(false);
-    setTarget(null);
-    activeTour = false;
-    localStorage.setItem("pasco_tour_skipped", "true");
-  }, [clearTimers]);
-
-  const getViewport = useCallback(() => {
-    const vv = window.visualViewport;
-    return {
-      width: vv?.width ?? window.innerWidth,
-      height: vv?.height ?? window.innerHeight,
-      // Fixed-position elements and getBoundingClientRect() are already expressed
-      // in visual-viewport coordinates on modern mobile browsers. Do not add
-      // visualViewport.offsetTop/offsetLeft to fixed CSS positions.
-    };
-  }, []);
-
-  const updateLayout = useCallback(() => {
-    const next = getLayoutMode();
-    if (next !== lastLayoutRef.current) {
-      lastLayoutRef.current = next;
-      setLayout(next);
-      setStep(0);
+  // Logical first-time user tour flow based strictly on existing features
+  const steps = useMemo<TourStep[]>(() => {
+    if (layout === "mobile") {
+      return [
+        {
+          key: "mobile-nav",
+          selector: "[data-tour='hamburger']",
+          fallbackSelector: "[data-tour='topbar']",
+          title: "Navigation & Tools",
+          description: "Tap here to toggle the operations menu and access vulnerability scanning, cryptographic engines, and security labs.",
+          icon: Compass,
+          preferredPlacement: "bottom",
+          spotlightPadding: 6,
+          borderRadius: 10,
+          waitForEvent: "tour:menu-opened",
+          waitTimeout: 5000,
+        },
+        {
+          key: "command-search",
+          selector: "[data-tour='command-btn']",
+          fallbackSelector: "[data-tour='topbar']",
+          title: "Quick Action Command Palette",
+          description: "Instantly search all security tools, trigger rapid scans, and execute commands from anywhere.",
+          icon: Command,
+          preferredPlacement: "bottom",
+          spotlightPadding: 6,
+          borderRadius: 10,
+        },
+        {
+          key: "guard-status",
+          selector: "[data-tour='guard-status']",
+          fallbackSelector: "[data-tour='topbar']",
+          title: "Active Guard & Telemetry",
+          description: "Real-time posture monitoring and live defense state verification for your active session.",
+          icon: Activity,
+          preferredPlacement: "bottom",
+          spotlightPadding: 6,
+          borderRadius: 12,
+        },
+        {
+          key: "defense-gauge",
+          selector: "[data-tour='defense-gauge']",
+          fallbackSelector: "[data-tour='dashboard']",
+          title: "Defense Posture Gauge",
+          description: "Your aggregated defense rating calculated dynamically from domain scans, TLS certificates, and NIST entropy audits.",
+          icon: ShieldCheck,
+          preferredPlacement: "bottom",
+          spotlightPadding: 8,
+          borderRadius: 16,
+        },
+        {
+          key: "security-suites",
+          selector: "[data-tour='security-suites']",
+          fallbackSelector: "[data-tour='dashboard']",
+          title: "Security Suites & Labs",
+          description: "Launch specialized defense engines: Domain Reconnaissance, Web Security Audit, AES-256 Crypto Lab, and AI Research.",
+          icon: Layers,
+          preferredPlacement: "top",
+          spotlightPadding: 8,
+          borderRadius: 16,
+        },
+        {
+          key: "user-profile",
+          selector: "[data-tour='user-profile']",
+          fallbackSelector: "[data-tour='topbar']",
+          title: "Operator Profile & Settings",
+          description: "Configure your defense persona (SOC Analyst, Red/Blue Team), custom data export formats, and security keys.",
+          icon: Settings,
+          preferredPlacement: "bottom",
+          spotlightPadding: 6,
+          borderRadius: 999,
+        },
+      ];
     }
+
+    return [
+      {
+        key: "sidebar-nav",
+        selector: "[data-tour='sidebar']",
+        title: "Navigation & Security Hub",
+        description: "Access your cyber defense command center: Domain Reconnaissance, TLS Audits, Email Anti-Spoofing, and Security Labs.",
+        icon: Compass,
+        preferredPlacement: "right",
+        spotlightPadding: 4,
+        borderRadius: 0,
+      },
+      {
+        key: "command-search",
+        selector: "[data-tour='command-search']",
+        title: "Command Palette & Quick Search",
+        description: "Press ⌘K or click here to rapidly search all cyber security modules, switch tools, and trigger fast actions.",
+        icon: Command,
+        preferredPlacement: "bottom",
+        spotlightPadding: 6,
+        borderRadius: 10,
+      },
+      {
+        key: "guard-status",
+        selector: "[data-tour='guard-status']",
+        title: "Live Guard Telemetry",
+        description: "Continuous telemetry monitoring active defenses, demo environment status, and operator authentication state.",
+        icon: Activity,
+        preferredPlacement: "bottom",
+        spotlightPadding: 6,
+        borderRadius: 12,
+      },
+      {
+        key: "defense-gauge",
+        selector: "[data-tour='defense-gauge']",
+        title: "Defense Posture Gauge",
+        description: "Aggregated cybersecurity rating calculated dynamically from your real-time network, web, and password audits.",
+        icon: ShieldCheck,
+        preferredPlacement: "bottom",
+        spotlightPadding: 10,
+        borderRadius: 16,
+      },
+      {
+        key: "security-suites",
+        selector: "[data-tour='security-suites']",
+        title: "Interactive Security Suites",
+        description: "One-click access to 7 dedicated defense tools including Domain Scanner, Web Audit, AES-256 Crypto Lab, and AI Research.",
+        icon: Layers,
+        preferredPlacement: "top",
+        spotlightPadding: 10,
+        borderRadius: 16,
+      },
+      {
+        key: "user-profile",
+        selector: "[data-tour='user-profile']",
+        title: "Settings & Operator Persona",
+        description: "Customize your threat analysis persona (SOC Analyst, Red/Blue Team), manage JSON/TXT export preferences, and update credentials.",
+        icon: Settings,
+        preferredPlacement: "bottom",
+        spotlightPadding: 6,
+        borderRadius: 999,
+      },
+    ];
+  }, [layout]);
+
+  const currentStep = steps[stepIndex] || steps[0];
+
+  // Helper to start the tour from beginning
+  const startTour = useCallback(() => {
+    setLayout(getLayoutMode());
+    setStepIndex(0);
+    setOpen(true);
   }, []);
 
-  const resolveTarget = useCallback(() => {
-    const current = steps[step];
-    if (!current) return null;
-    return findVisible(current.selector);
-  }, [step, steps]);
+  // Helper to finish/close the tour
+  const finishTour = useCallback(() => {
+    if (eventTimerRef.current) {
+      clearTimeout(eventTimerRef.current);
+      eventTimerRef.current = null;
+    }
+    setOpen(false);
+    setTargetElement(null);
+    setSpotlight(null);
+    localStorage.setItem(STORAGE_KEY, "true");
+    localStorage.setItem(SKIPPED_KEY, "true");
+  }, []);
 
-  const positionTooltip = useCallback(
-    (el: HTMLElement) => {
-      const viewport = getViewport();
-      const mobile = layout === "mobile";
-      const width = mobile
-        ? Math.min(TOOLTIP_MOBILE_MAX_WIDTH, Math.max(240, viewport.width - VIEWPORT_PADDING * 2))
-        : TOOLTIP_DESKTOP_WIDTH;
-      const rect = el.getBoundingClientRect();
-      const tooltipHeight = mobile
-        ? Math.min(190, Math.max(130, viewport.height * 0.35))
-        : TOOLTIP_ESTIMATED_HEIGHT;
+  // Auto-start for first-time visitors or on explicit replay event
+  useEffect(() => {
+    const handleReplayTour = () => {
+      startTour();
+    };
 
-      const maxLeft = Math.max(VIEWPORT_PADDING, viewport.width - width - VIEWPORT_PADDING);
-      const left = Math.min(maxLeft, Math.max(VIEWPORT_PADDING, rect.left));
-      const below = rect.bottom + TOOLTIP_GAP;
-      const above = rect.top - TOOLTIP_GAP - tooltipHeight;
-      const safeTop = VIEWPORT_PADDING;
-      const safeBottom = viewport.height - VIEWPORT_PADDING;
+    window.addEventListener("start-app-tour", handleReplayTour);
+    window.addEventListener("replay-app-tour", handleReplayTour);
 
-      let top: number;
-      if (below + tooltipHeight <= safeBottom) {
-        top = below;
-      } else if (above >= safeTop) {
-        top = above;
-      } else {
-        top = Math.max(safeTop, safeBottom - tooltipHeight);
-      }
+    const completed = localStorage.getItem(STORAGE_KEY);
+    const skipped = localStorage.getItem(SKIPPED_KEY);
 
-      setTooltipPos({ top: Math.round(top), left: Math.round(left) });
-    },
-    [getViewport, layout]
-  );
+    if (!completed && !skipped && !initialTriggerRef.current) {
+      initialTriggerRef.current = true;
+      const timer = setTimeout(() => {
+        startTour();
+      }, 700);
+      return () => {
+        clearTimeout(timer);
+        window.removeEventListener("start-app-tour", handleReplayTour);
+        window.removeEventListener("replay-app-tour", handleReplayTour);
+      };
+    }
 
-  const recalculate = useCallback(() => {
+    return () => {
+      window.removeEventListener("start-app-tour", handleReplayTour);
+      window.removeEventListener("replay-app-tour", handleReplayTour);
+    };
+  }, [isDemo, startTour]);
+
+  // Position calculation algorithm
+  const updatePositions = useCallback(() => {
     if (!open) return;
-    updateLayout();
-    const el = resolveTarget();
-    setTarget(el);
-    if (!el) return;
+
+    const currentMode = getLayoutMode();
+    if (currentMode !== layout) {
+      setLayout(currentMode);
+    }
+
+    const step = steps[stepIndex];
+    if (!step) return;
+
+    let el = findVisible(step.selector);
+    if (!el && step.fallbackSelector) {
+      el = findVisible(step.fallbackSelector);
+    }
+
+    if (!el) {
+      // If target element is not found on this view, check fallback or skip gracefully
+      setTargetElement(null);
+      setSpotlight(null);
+      return;
+    }
+
+    setTargetElement(el);
 
     const rect = el.getBoundingClientRect();
-    const viewport = getViewport();
-    const visible =
-      rect.top >= 0 &&
-      rect.left >= 0 &&
-      rect.bottom <= viewport.height &&
-      rect.right <= viewport.width;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const pad = step.spotlightPadding ?? 8;
+    const radius = step.borderRadius ?? 12;
 
-    // Never scroll a fixed/mobile hamburger just because the browser chrome moved.
-    if (!visible && !(layout === "mobile" && steps[step]?.key === "hamburger")) {
+    // Calculate spotlight cutout bounds with safe viewport clamping
+    const rawX = rect.left - pad;
+    const rawY = rect.top - pad;
+    const rawW = rect.width + pad * 2;
+    const rawH = rect.height + pad * 2;
+
+    const spotX = Math.max(0, Math.min(rawX, vw));
+    const spotY = Math.max(0, Math.min(rawY, vh));
+    const spotW = Math.max(10, Math.min(rawW, vw - spotX));
+    const spotH = Math.max(10, Math.min(rawH, vh - spotY));
+
+    setSpotlight({
+      x: Math.round(spotX),
+      y: Math.round(spotY),
+      width: Math.round(spotW),
+      height: Math.round(spotH),
+      radius,
+    });
+
+    // Auto-scroll target into view if partially off-screen (except full fixed sidebars/navs)
+    const isOffscreen =
+      rect.top < 60 ||
+      rect.bottom > vh - 60 ||
+      rect.left < 0 ||
+      rect.right > vw;
+
+    if (isOffscreen && step.key !== "sidebar-nav" && step.key !== "mobile-nav") {
       el.scrollIntoView({
         behavior: prefersReducedMotion ? "auto" : "smooth",
         block: "center",
@@ -232,229 +362,369 @@ export function AppTour() {
       });
     }
 
-    positionTooltip(el);
-  }, [layout, open, positionTooltip, prefersReducedMotion, resolveTarget, steps, step, updateLayout, getViewport]);
+    // Calculate Tooltip Coordinates
+    const isMobile = currentMode === "mobile";
+    const tooltipWidth = isMobile
+      ? Math.min(vw - TOOLTIP_MOBILE_WIDTH_OFFSET, 360)
+      : TOOLTIP_DESKTOP_WIDTH;
+    const estimatedHeight = 180;
 
-  useEffect(() => {
-    if (activeTour) return;
-    const skipped = localStorage.getItem("pasco_tour_skipped");
-    if ((isDemo || !skipped) && !startedRef.current) {
-      startedRef.current = true;
-      activeTour = true;
-      setLayout(getLayoutMode());
-      setStep(0);
-      setOpen(true);
+    let finalTop = 0;
+    let finalLeft = 0;
+    let finalPlacement: "top" | "bottom" | "left" | "right" = step.preferredPlacement || "bottom";
+    let arrowOffset = 24;
+
+    if (isMobile) {
+      // On mobile, position centrally aligned either below or above the target
+      finalLeft = Math.max(VIEWPORT_PADDING, (vw - tooltipWidth) / 2);
+      const spaceBelow = vh - spotY - spotH;
+      const spaceAbove = spotY;
+
+      if (spaceBelow >= estimatedHeight + TOOLTIP_GAP + 20 || spaceBelow >= spaceAbove) {
+        finalTop = spotY + spotH + TOOLTIP_GAP;
+        finalPlacement = "bottom";
+        // Clamp so it doesn't overflow bottom edge
+        finalTop = Math.min(finalTop, vh - estimatedHeight - VIEWPORT_PADDING - 40);
+      } else {
+        finalTop = Math.max(VIEWPORT_PADDING, spotY - estimatedHeight - TOOLTIP_GAP);
+        finalPlacement = "top";
+      }
+
+      arrowOffset = Math.max(20, Math.min(spotX + spotW / 2 - finalLeft, tooltipWidth - 20));
+    } else {
+      // Desktop positioning with smart collision fallback
+      const targetCenterX = spotX + spotW / 2;
+      const targetCenterY = spotY + spotH / 2;
+
+      const spaceBelow = vh - (spotY + spotH);
+      const spaceAbove = spotY;
+      const spaceRight = vw - (spotX + spotW);
+      const spaceLeft = spotX;
+
+      if (step.preferredPlacement === "right" && spaceRight >= tooltipWidth + TOOLTIP_GAP) {
+        finalPlacement = "right";
+        finalLeft = spotX + spotW + TOOLTIP_GAP;
+        finalTop = Math.max(VIEWPORT_PADDING, Math.min(targetCenterY - estimatedHeight / 2, vh - estimatedHeight - VIEWPORT_PADDING));
+      } else if (step.preferredPlacement === "left" && spaceLeft >= tooltipWidth + TOOLTIP_GAP) {
+        finalPlacement = "left";
+        finalLeft = spotX - tooltipWidth - TOOLTIP_GAP;
+        finalTop = Math.max(VIEWPORT_PADDING, Math.min(targetCenterY - estimatedHeight / 2, vh - estimatedHeight - VIEWPORT_PADDING));
+      } else if (step.preferredPlacement === "top" && spaceAbove >= estimatedHeight + TOOLTIP_GAP) {
+        finalPlacement = "top";
+        finalTop = spotY - estimatedHeight - TOOLTIP_GAP;
+        finalLeft = Math.max(VIEWPORT_PADDING, Math.min(targetCenterX - tooltipWidth / 2, vw - tooltipWidth - VIEWPORT_PADDING));
+      } else if (spaceBelow >= estimatedHeight + TOOLTIP_GAP) {
+        finalPlacement = "bottom";
+        finalTop = spotY + spotH + TOOLTIP_GAP;
+        finalLeft = Math.max(VIEWPORT_PADDING, Math.min(targetCenterX - tooltipWidth / 2, vw - tooltipWidth - VIEWPORT_PADDING));
+      } else if (spaceAbove >= estimatedHeight + TOOLTIP_GAP) {
+        finalPlacement = "top";
+        finalTop = spotY - estimatedHeight - TOOLTIP_GAP;
+        finalLeft = Math.max(VIEWPORT_PADDING, Math.min(targetCenterX - tooltipWidth / 2, vw - tooltipWidth - VIEWPORT_PADDING));
+      } else {
+        // Fallback inside safe viewport bounds
+        finalPlacement = "bottom";
+        finalTop = Math.max(VIEWPORT_PADDING, vh - estimatedHeight - VIEWPORT_PADDING - 20);
+        finalLeft = Math.max(VIEWPORT_PADDING, Math.min(targetCenterX - tooltipWidth / 2, vw - tooltipWidth - VIEWPORT_PADDING));
+      }
+
+      arrowOffset = Math.max(20, Math.min(targetCenterX - finalLeft, tooltipWidth - 20));
     }
-  }, [isDemo]);
 
+    setTooltipCoords({
+      top: Math.round(finalTop),
+      left: Math.round(finalLeft),
+      placement: finalPlacement,
+      arrowOffset: Math.round(arrowOffset),
+    });
+  }, [layout, open, prefersReducedMotion, stepIndex, steps]);
+
+  // Handle keyboard navigation
   useEffect(() => {
     if (!open) return;
 
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        finish();
-      } else if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        setStep((current) => Math.max(0, current - 1));
-      } else if (event.key === "ArrowRight" || event.key === " ") {
-        event.preventDefault();
-        setStep((current) => (current >= steps.length - 1 ? current : current + 1));
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finishTour();
+      } else if (e.key === "ArrowRight" || e.key === "Enter") {
+        e.preventDefault();
+        if (stepIndex < steps.length - 1) {
+          setStepIndex((s) => s + 1);
+        } else {
+          finishTour();
+        }
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setStepIndex((s) => Math.max(0, s - 1));
       }
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [finish, open, steps.length]);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [finishTour, open, stepIndex, steps.length]);
 
+  // Synchronize on step change, resize, scroll, or DOM mutations
   useEffect(() => {
     if (!open) return;
-    const current = steps[step];
-    if (!current?.waitForEvent) return;
 
-    const onEvent = () => {
-      if (eventTimerRef.current) clearTimeout(eventTimerRef.current);
-      eventTimerRef.current = setTimeout(() => setStep((value) => Math.min(value + 1, steps.length - 1)), 200);
+    let animFrame: number;
+    const scheduleUpdate = () => {
+      cancelAnimationFrame(animFrame);
+      animFrame = requestAnimationFrame(updatePositions);
     };
 
-    window.addEventListener(current.waitForEvent, onEvent);
+    scheduleUpdate();
+
+    window.addEventListener("resize", scheduleUpdate, { passive: true });
+    window.addEventListener("scroll", scheduleUpdate, { passive: true, capture: true });
+    window.visualViewport?.addEventListener("resize", scheduleUpdate, { passive: true });
+    window.visualViewport?.addEventListener("scroll", scheduleUpdate, { passive: true });
+
+    const observer = new MutationObserver(scheduleUpdate);
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "aria-hidden"],
+    });
+
+    return () => {
+      cancelAnimationFrame(animFrame);
+      window.removeEventListener("resize", scheduleUpdate);
+      window.removeEventListener("scroll", scheduleUpdate, true);
+      window.visualViewport?.removeEventListener("resize", scheduleUpdate);
+      window.visualViewport?.removeEventListener("scroll", scheduleUpdate);
+      observer.disconnect();
+    };
+  }, [open, stepIndex, location.pathname, updatePositions]);
+
+  // Handle waiting for interactive event (like opening mobile drawer)
+  useEffect(() => {
+    if (!open) return;
+    const current = steps[stepIndex];
+    if (!current?.waitForEvent) return;
+
+    const handleEvent = () => {
+      if (eventTimerRef.current) clearTimeout(eventTimerRef.current);
+      eventTimerRef.current = setTimeout(() => {
+        setStepIndex((s) => Math.min(s + 1, steps.length - 1));
+      }, 150);
+    };
+
+    window.addEventListener(current.waitForEvent, handleEvent);
     eventTimerRef.current = setTimeout(() => {
-      setStep((value) => Math.min(value + 1, steps.length - 1));
+      setStepIndex((s) => Math.min(s + 1, steps.length - 1));
     }, current.waitTimeout ?? 5000);
 
     return () => {
-      window.removeEventListener(current.waitForEvent!, onEvent);
+      window.removeEventListener(current.waitForEvent!, handleEvent);
       if (eventTimerRef.current) clearTimeout(eventTimerRef.current);
       eventTimerRef.current = null;
     };
-  }, [open, step, steps]);
+  }, [open, stepIndex, steps]);
 
-  useEffect(() => {
-    if (!open) return;
-    let frame = 0;
+  if (!open || !spotlight) return null;
 
-    const schedule = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => recalculate());
-    };
-
-    const onResize = () => {
-      updateLayout();
-      schedule();
-    };
-    const onScroll = () => schedule();
-
-    window.addEventListener("resize", onResize, { passive: true });
-    window.addEventListener("orientationchange", onResize, { passive: true });
-    window.addEventListener("scroll", onScroll, { passive: true, capture: true });
-    window.visualViewport?.addEventListener("resize", onResize, { passive: true });
-    window.visualViewport?.addEventListener("scroll", onScroll, { passive: true });
-
-    const observer = new MutationObserver(schedule);
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "aria-hidden"] });
-
-    schedule();
-
-    return () => {
-      cancelAnimationFrame(frame);
-      window.removeEventListener("resize", onResize);
-      window.removeEventListener("orientationchange", onResize);
-      window.removeEventListener("scroll", onScroll, true);
-      window.visualViewport?.removeEventListener("resize", onResize);
-      window.visualViewport?.removeEventListener("scroll", onScroll);
-      observer.disconnect();
-    };
-  }, [open, recalculate, updateLayout]);
-
-  useEffect(() => {
-    if (!open) return;
-    recalculate();
-  }, [open, step, location.pathname, recalculate]);
-
-  useEffect(() => () => {
-    clearTimers();
-    activeTour = false;
-  }, [clearTimers]);
-
-  if (!open || !target) return null;
-
-  const current = steps[step];
-  if (!current) return null;
-
-  const viewport = getViewport();
-  const rect = target.getBoundingClientRect();
-  const isFull = current.focus === "full";
-  const topbar = findVisible("[data-tour='topbar']");
-  const focusTop = isFull
-    ? 0
-    : current.focus === "viewport"
-      ? (topbar?.getBoundingClientRect().bottom ?? 56) + 12
-      : rect.top;
-  const focusHeight = isFull
-    ? viewport.height
-    : current.focus === "viewport"
-      ? Math.max(0, viewport.height - focusTop - 12)
-      : rect.height;
-  const focusLeft = current.focus === "full" || current.focus === "viewport" ? 0 : rect.left;
-  const focusWidth = current.focus === "full" || current.focus === "viewport" ? viewport.width : rect.width;
-  const tooltipWidth = layout === "mobile"
-    ? Math.min(TOOLTIP_MOBILE_MAX_WIDTH, Math.max(240, viewport.width - VIEWPORT_PADDING * 2))
-    : TOOLTIP_DESKTOP_WIDTH;
-
-  const overlayStyle = (extra: React.CSSProperties = {}) => ({
-    position: "fixed" as const,
-    zIndex: 1000,
-    background: "rgba(0,0,0,.70)",
-    pointerEvents: "auto" as const,
-    ...extra,
-  });
+  const isFirstStep = stepIndex === 0;
+  const isLastStep = stepIndex === steps.length - 1;
+  const StepIcon = currentStep.icon;
 
   return (
     <>
-      <div className="fixed inset-0 z-[1000] pointer-events-none" aria-hidden="true">
-        <div style={overlayStyle({ left: 0, top: 0, width: "100%", height: Math.max(0, focusTop) })} />
-        <div style={overlayStyle({ left: 0, top: focusTop + focusHeight, width: "100%", bottom: 0 })} />
-        <div style={overlayStyle({ left: 0, top: focusTop, width: Math.max(0, focusLeft), height: focusHeight })} />
-        <div style={overlayStyle({ left: focusLeft + focusWidth, top: focusTop, right: 0, height: focusHeight })} />
-      </div>
+      {/* ----------------- 1. SPOTLIGHT MASK OVERLAY ----------------- */}
+      <svg
+        id="tour-spotlight-svg"
+        className="fixed inset-0 w-full h-full pointer-events-none z-[1000] select-none"
+        aria-hidden="true"
+      >
+        <defs>
+          <mask id="tour-spotlight-mask">
+            {/* Opaque white area covering the entire screen */}
+            <rect x="0" y="0" width="100%" height="100%" fill="white" />
+            {/* Transparent cutout shape over the highlighted target element */}
+            <rect
+              x={spotlight.x}
+              y={spotlight.y}
+              width={spotlight.width}
+              height={spotlight.height}
+              rx={spotlight.radius}
+              ry={spotlight.radius}
+              fill="black"
+              style={{
+                transition: prefersReducedMotion ? "none" : "all 0.28s cubic-bezier(0.16, 1, 0.3, 1)",
+              }}
+            />
+          </mask>
+        </defs>
 
+        {/* Semi-transparent dark overlay */}
+        <rect
+          x="0"
+          y="0"
+          width="100%"
+          height="100%"
+          fill="rgba(4, 9, 18, 0.76)"
+          mask="url(#tour-spotlight-mask)"
+          className="pointer-events-auto cursor-default"
+          onClick={(e) => {
+            e.stopPropagation();
+          }}
+        />
+      </svg>
+
+      {/* ----------------- 2. SPOTLIGHT HIGHLIGHT RING & GLOW ----------------- */}
       <div
-        className="fixed z-[1001] pointer-events-none rounded-lg"
+        id="tour-spotlight-ring"
+        className="fixed pointer-events-none z-[1001] rounded-lg"
         style={{
-          top: focusTop - 4,
-          left: focusLeft - 4,
-          width: focusWidth + 8,
-          height: focusHeight + 8,
-          outline: "2px solid rgba(34,211,238,.95)",
-          boxShadow: "0 0 30px rgba(34,211,238,.30)",
-          transition: prefersReducedMotion ? "none" : "all .25s ease-out",
+          top: spotlight.y,
+          left: spotlight.x,
+          width: spotlight.width,
+          height: spotlight.height,
+          borderRadius: `${spotlight.radius}px`,
+          border: "2px solid rgba(34, 211, 238, 0.92)",
+          boxShadow: "0 0 24px rgba(34, 211, 238, 0.35), inset 0 0 12px rgba(34, 211, 238, 0.15)",
+          transition: prefersReducedMotion ? "none" : "all 0.28s cubic-bezier(0.16, 1, 0.3, 1)",
         }}
         aria-hidden="true"
-      />
-
-      <div
-        className="fixed z-[1002] bg-card border border-border rounded-xl shadow-xl"
-        style={{
-          top: tooltipPos.top,
-          left: Math.max(VIEWPORT_PADDING, Math.min(tooltipPos.left, viewport.width - tooltipWidth - VIEWPORT_PADDING)),
-          width: tooltipWidth,
-          maxHeight: layout === "mobile" ? "min(35vh, 220px)" : "50vh",
-          overflowY: "auto",
-          overflowX: "hidden",
-          padding: "1rem",
-          paddingBottom: layout === "mobile" ? "max(1rem, calc(1rem + env(safe-area-inset-bottom)))" : "1rem",
-          transition: prefersReducedMotion ? "none" : "all .25s ease-out",
-          boxSizing: "border-box",
-        }}
-        role="dialog"
-        aria-label="Tour step"
-        aria-live="polite"
       >
-        <div className="text-xs font-mono text-muted-foreground mb-2">
-          Step {step + 1} of {steps.length}
-        </div>
-        <h3 className="font-semibold text-foreground text-sm">{current.title}</h3>
-        <p className="text-xs sm:text-sm text-muted-foreground mt-1">{current.text}</p>
+        {/* Subtle pulsing indicator corner */}
+        <span className="absolute -top-1.5 -right-1.5 flex h-3.5 w-3.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75" />
+          <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-primary shadow-neon-cyan-sm" />
+        </span>
+      </div>
 
-        <div className="flex items-center justify-between mt-4 gap-2">
-          <button
-            type="button"
-            onClick={finish}
-            className="min-h-11 px-2 text-xs sm:text-sm font-semibold text-red-500 hover:underline cursor-pointer touch-manipulation"
-            aria-label="Skip tour"
-          >
-            Skip
-          </button>
+      {/* ----------------- 3. PREMIUM TOUR TOOLTIP / POPOVER ----------------- */}
+      <div
+        id="tour-tooltip-popover"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Product Tour: ${currentStep.title}`}
+        className="fixed z-[1002] bg-card/95 backdrop-blur-xl border border-primary/40 rounded-xl shadow-2xl overflow-hidden animate-fade-in"
+        style={{
+          top: tooltipCoords.top,
+          left: tooltipCoords.left,
+          width: layout === "mobile" ? `calc(100vw - ${TOOLTIP_MOBILE_WIDTH_OFFSET}px)` : `${TOOLTIP_DESKTOP_WIDTH}px`,
+          maxWidth: "400px",
+          boxShadow: "0 20px 50px -10px rgba(0, 0, 0, 0.8), 0 0 25px rgba(34, 211, 238, 0.15)",
+          transition: prefersReducedMotion ? "none" : "top 0.25s ease-out, left 0.25s ease-out",
+        }}
+      >
+        {/* Subtle top glowing accent line */}
+        <div className="h-1 w-full bg-gradient-to-r from-primary via-secondary to-primary/80" />
 
-          <div className="flex gap-2">
-            {step > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setStep((value) => value - 1)}
-                className="min-h-11 min-w-11 touch-manipulation"
-                aria-label="Previous step"
-              >
-                Back
-              </Button>
-            )}
-
-            {!current.waitForEvent && (
-              <Button
-                size="sm"
-                onClick={() => step >= steps.length - 1 ? finish() : setStep((value) => value + 1)}
-                className="min-h-11 min-w-11 touch-manipulation"
-                aria-label={step >= steps.length - 1 ? "Finish tour" : "Next step"}
-              >
-                {step >= steps.length - 1 ? "Finish" : "Next"}
-              </Button>
-            )}
-
-            {current.waitForEvent && (
-              <span className="min-h-11 flex items-center text-xs text-muted-foreground italic">
-                Waiting…
+        <div className="p-4 sm:p-5">
+          {/* Header with Step indicator, badges, and Close X */}
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-primary/15 text-primary border border-primary/30 uppercase tracking-wider">
+                Step {stepIndex + 1} of {steps.length}
               </span>
-            )}
+              <span className="text-[10px] font-mono text-muted-foreground hidden sm:inline">
+                Interactive Tour
+              </span>
+            </div>
+
+            <button
+              id="tour-btn-close-x"
+              type="button"
+              onClick={finishTour}
+              className="text-muted-foreground hover:text-foreground p-1 rounded-md hover:bg-muted/50 transition-colors cursor-pointer touch-manipulation"
+              title="Close tour (Esc)"
+              aria-label="Close tour"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Title & Icon */}
+          <div className="flex items-start gap-3">
+            <div className="p-2 rounded-lg bg-primary/10 border border-primary/20 text-primary shrink-0 mt-0.5">
+              <StepIcon className="w-4 h-4 sm:w-5 sm:h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-foreground text-sm sm:text-base leading-tight tracking-tight">
+                {currentStep.title}
+              </h3>
+              <p className="text-xs sm:text-sm text-muted-foreground mt-1.5 leading-relaxed">
+                {currentStep.description}
+              </p>
+            </div>
+          </div>
+
+          {/* Progress dots bar */}
+          <div className="flex items-center gap-1.5 mt-4 pt-3 border-t border-border/50">
+            <div className="flex items-center gap-1">
+              {steps.map((_, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => setStepIndex(idx)}
+                  className={`h-1.5 rounded-full transition-all duration-200 cursor-pointer ${
+                    idx === stepIndex
+                      ? "w-5 bg-primary shadow-neon-cyan-sm"
+                      : idx < stepIndex
+                      ? "w-2 bg-primary/40"
+                      : "w-2 bg-muted-foreground/30"
+                  }`}
+                  aria-label={`Jump to step ${idx + 1}`}
+                />
+              ))}
+            </div>
+
+            {/* Keyboard shortcut hint (desktop only) */}
+            <span className="ml-auto text-[10px] font-mono text-muted-foreground/70 hidden sm:inline">
+              <kbd className="px-1 py-0.5 rounded bg-muted/60 text-[9px] border border-border/60">Esc</kbd> skip • <kbd className="px-1 py-0.5 rounded bg-muted/60 text-[9px] border border-border/60">→</kbd> next
+            </span>
+          </div>
+
+          {/* Action buttons footer */}
+          <div className="flex items-center justify-between gap-2 mt-3.5">
+            <button
+              id="tour-btn-skip"
+              type="button"
+              onClick={finishTour}
+              className="text-xs font-semibold text-muted-foreground hover:text-foreground hover:underline transition-colors px-2 py-1.5 rounded touch-manipulation cursor-pointer"
+            >
+              Skip Tour
+            </button>
+
+            <div className="flex items-center gap-2">
+              {!isFirstStep && (
+                <Button
+                  id="tour-btn-back"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setStepIndex((s) => Math.max(0, s - 1))}
+                  className="h-8 sm:h-9 px-3 text-xs gap-1 border-border/80 hover:border-primary/40 touch-manipulation"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back</span>
+                </Button>
+              )}
+
+              <Button
+                id="tour-btn-next"
+                size="sm"
+                onClick={() => {
+                  if (isLastStep) {
+                    finishTour();
+                  } else {
+                    setStepIndex((s) => s + 1);
+                  }
+                }}
+                className="h-8 sm:h-9 px-3.5 text-xs font-semibold gap-1.5 shadow-neon-cyan-sm touch-manipulation bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                <span>{isLastStep ? "Finish Tour" : "Next"}</span>
+                {isLastStep ? (
+                  <Sparkles className="w-3.5 h-3.5 text-primary-foreground" />
+                ) : (
+                  <ArrowRight className="w-3.5 h-3.5" />
+                )}
+              </Button>
+            </div>
           </div>
         </div>
       </div>

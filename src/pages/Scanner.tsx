@@ -11,6 +11,9 @@ import { InteractiveCard } from "@/components/motion/InteractiveCard";
 import { GlassPanel } from "@/components/motion/GlassPanel";
 import { SecurityGauge } from "@/components/security/SecurityGauge";
 import { PageTransition } from "@/components/motion/PageTransition";
+import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
+import { AnimatedRadar } from "@/components/motion/AnimatedRadar";
+import { PulseIndicator } from "@/components/motion/PulseIndicator";
 import {
   Shield,
   Scan,
@@ -237,18 +240,16 @@ export default function Scanner() {
 
   return (
     <PageTransition className="space-y-6 max-w-6xl">
-      {/* Header */}
-      <div>
-        <div className="flex items-center gap-3">
-          <h1 className="text-3xl font-bold text-gradient-cyber">Cybersecurity Scanner</h1>
-          <Badge variant="outline" className="border-cyan-500/30 text-cyan-400 font-mono text-xs">
-            SSRF-RESTRICTED
-          </Badge>
-        </div>
-        <p className="text-muted-foreground mt-1 text-sm">
-          Server-side non-intrusive security analysis, DNS reconnaissance, TLS inspection, and security header audit.
-        </p>
-      </div>
+      {/* Animated Header */}
+      <AnimatedPageHeading
+        title="Cybersecurity Scanner"
+        subtitle="Server-side non-intrusive security analysis, DNS reconnaissance, TLS inspection, and security header audit."
+        badgeText="SSRF-RESTRICTED"
+        badgeVariant="cyan"
+        statusText={isScanning ? "Active Probing in Progress" : "Scanner Ready"}
+        statusColor={isScanning ? "amber" : "emerald"}
+        icon={Scan}
+      />
 
       {/* Target Input Card */}
       <GlassPanel variant="cyber">
@@ -274,7 +275,7 @@ export default function Scanner() {
             <Button
               onClick={() => runScan()}
               disabled={!target.trim() || !isTargetFormatValid(target) || isScanning}
-              className="w-full md:w-auto min-w-[140px] bg-primary text-primary-foreground font-semibold shadow-neon-cyan"
+              className="w-full md:w-auto min-w-[140px] bg-primary text-primary-foreground font-semibold shadow-neon-cyan active:scale-95 transition-all"
             >
               {isScanning ? (
                 <>
@@ -291,15 +292,23 @@ export default function Scanner() {
           </div>
         </div>
 
-        {/* Live Progress Bar */}
+        {/* Live Progress Bar with Radar Telemetry */}
         {isScanning && (
-          <div className="mt-5 space-y-2 animate-fade-in">
-            <div className="flex justify-between text-xs font-mono text-muted-foreground">
-              <span className="flex items-center gap-1.5 text-cyan-400">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Querying DNS, TLS socket & HTTP headers...
-              </span>
-              <span>{scanProgress}%</span>
+          <div className="mt-5 pt-4 border-t border-white/10 space-y-3 animate-fade-in">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <AnimatedRadar size={44} active color="cyan" />
+                <div>
+                  <p className="text-xs font-mono font-medium text-cyan-400 flex items-center gap-1.5">
+                    <PulseIndicator color="cyan" size="sm" pulse />
+                    Active Surface Inspection
+                  </p>
+                  <p className="text-[11px] text-muted-foreground font-mono">
+                    Querying DNS, TLS socket & HTTP security headers...
+                  </p>
+                </div>
+              </div>
+              <span className="text-sm font-mono font-bold text-cyan-400">{scanProgress}%</span>
             </div>
             <Progress value={scanProgress} className="h-1.5 bg-white/5" />
           </div>

@@ -1,0 +1,6 @@
+{
+  "name": "PascoAI Cybersecurity Suite",
+  "description": "Unified cyber defense OS featuring real-time reconnaissance, TLS/DNS audits, email anti-spoofing, cryptography, and interactive product tour.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
