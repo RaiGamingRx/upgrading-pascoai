@@ -9,7 +9,7 @@ interface MetricCardProps {
   icon?: React.ReactNode;
   trend?: "up" | "down" | "neutral";
   trendValue?: string;
-  glowColor?: "cyan" | "purple" | "green" | "amber";
+  glowColor?: "cyan" | "purple" | "emerald" | "amber" | "green";
   className?: string;
 }
 
@@ -24,10 +24,11 @@ export function MetricCard({
   className,
 }: MetricCardProps) {
   const trendColor = trend === "up" ? "text-success" : trend === "down" ? "text-destructive" : "text-muted-foreground";
+  const mappedGlow = glowColor === "green" ? "emerald" : glowColor;
 
   return (
     <InteractiveCard
-      glowColor={glowColor}
+      glowColor={mappedGlow}
       className={cn(
         "p-4 sm:p-5 flex flex-col justify-between h-full",
         className

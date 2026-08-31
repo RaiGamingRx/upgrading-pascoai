@@ -188,6 +188,7 @@ ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs FORCE ROW LEVEL SECURITY;
 
 -- 2. Organizations RLS Policy
+DROP POLICY IF EXISTS rls_organizations_isolation ON organizations;
 CREATE POLICY rls_organizations_isolation ON organizations
     FOR ALL
     USING (
@@ -195,6 +196,7 @@ CREATE POLICY rls_organizations_isolation ON organizations
     );
 
 -- 3. Workspaces RLS Policy
+DROP POLICY IF EXISTS rls_workspaces_isolation ON workspaces;
 CREATE POLICY rls_workspaces_isolation ON workspaces
     FOR ALL
     USING (
@@ -205,14 +207,17 @@ CREATE POLICY rls_workspaces_isolation ON workspaces
         )
     );
 
--- 4. Workspace Members RLS Policy
+-- 4. Workspace Members RLS Policy (Allows tenant org or authenticating user access)
+DROP POLICY IF EXISTS rls_workspace_members_isolation ON workspace_members;
 CREATE POLICY rls_workspace_members_isolation ON workspace_members
     FOR ALL
     USING (
         organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
+        OR user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid
     );
 
 -- 5. Assets RLS Policy (Strict org + workspace match)
+DROP POLICY IF EXISTS rls_assets_isolation ON assets;
 CREATE POLICY rls_assets_isolation ON assets
     FOR ALL
     USING (
@@ -221,6 +226,7 @@ CREATE POLICY rls_assets_isolation ON assets
     );
 
 -- 6. Scans RLS Policy
+DROP POLICY IF EXISTS rls_scans_isolation ON scans;
 CREATE POLICY rls_scans_isolation ON scans
     FOR ALL
     USING (
@@ -229,6 +235,7 @@ CREATE POLICY rls_scans_isolation ON scans
     );
 
 -- 7. Findings RLS Policy
+DROP POLICY IF EXISTS rls_findings_isolation ON findings;
 CREATE POLICY rls_findings_isolation ON findings
     FOR ALL
     USING (
@@ -237,6 +244,7 @@ CREATE POLICY rls_findings_isolation ON findings
     );
 
 -- 8. Audit Logs RLS Policy
+DROP POLICY IF EXISTS rls_audit_logs_isolation ON audit_logs;
 CREATE POLICY rls_audit_logs_isolation ON audit_logs
     FOR ALL
     USING (

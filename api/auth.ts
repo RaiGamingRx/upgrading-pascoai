@@ -33,12 +33,12 @@ export default async function authHandler(req: IncomingMessage & { body?: any; q
     // ------------------------------------------------------------------------
     if (method === "POST" && action === "register") {
       const { email, password, displayName, organizationName } = req.body || {};
-      if (!email || !password || !displayName || !organizationName) {
-        return res.status(400).json({ error: "Missing required fields (email, password, displayName, organizationName)" });
+      if (!email || !password || !displayName) {
+        return res.status(400).json({ error: "Missing required fields (email, password, displayName)" });
       }
 
-      if (password.length < 10) {
-        return res.status(400).json({ error: "Password must be at least 10 characters" });
+      if (password.length < 8) {
+        return res.status(400).json({ error: "Password must be at least 8 characters" });
       }
 
       const existingUser = await db.findUserByEmail(email);
@@ -46,16 +46,17 @@ export default async function authHandler(req: IncomingMessage & { body?: any; q
         return res.status(409).json({ error: "User already exists with this email" });
       }
 
+      const effectiveOrgName = organizationName?.trim() || `${displayName.trim()}'s Security Perimeter`;
       const passwordHash = await hashPassword(password);
       const user = await db.createUser({
         email,
-        display_name: displayName,
+        display_name: displayName.trim(),
         password_hash: passwordHash,
         is_active: true,
       });
 
-      const slug = organizationName.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 32);
-      const org = await db.createOrganization(organizationName, `${slug}-${Date.now().toString(36)}`);
+      const slug = effectiveOrgName.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 32);
+      const org = await db.createOrganization(effectiveOrgName, `${slug}-${Date.now().toString(36)}`);
       const workspace = await db.createWorkspace(org.id, "Production Perimeter", "production", true);
       
       // Default creator becomes org_admin
@@ -208,6 +209,64 @@ export default async function authHandler(req: IncomingMessage & { body?: any; q
           role: context.role,
         },
       });
+    }
+
+    // ------------------------------------------------------------------------
+    // CHANGE PASSWORD (Argon2id re-hashing with old password verification)
+    // ------------------------------------------------------------------------
+    if (method === "POST" && action === "change-password") {
+      const authHeader = req.headers?.authorization;
+      const { userPayload } = await authenticateAndAuthorize(db, authHeader);
+      const { oldPassword, newPassword } = req.body || {};
+
+      if (!oldPassword || !newPassword) {
+        return res.status(400).json({ error: "Both current and new passwords are required" });
+      }
+
+      if (newPassword.length < 8) {
+        return res.status(400).json({ error: "New password must be at least 8 characters" });
+      }
+
+      const user = await db.findUserById(userPayload.sub);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const isValid = await verifyPassword(oldPassword, user.password_hash);
+      if (!isValid) {
+        return res.status(401).json({ error: "Incorrect current password" });
+      }
+
+      const newHash = await hashPassword(newPassword);
+      await db.updateUserPassword(user.id, newHash);
+      return res.status(200).json({ message: "Password updated successfully" });
+    }
+
+    // ------------------------------------------------------------------------
+    // UPDATE PROFILE
+    // ------------------------------------------------------------------------
+    if (method === "POST" && action === "update-profile") {
+      const authHeader = req.headers?.authorization;
+      const { userPayload } = await authenticateAndAuthorize(db, authHeader);
+      const { displayName } = req.body || {};
+
+      if (!displayName || !displayName.trim()) {
+        return res.status(400).json({ error: "Display name cannot be empty" });
+      }
+
+      await db.updateUserDisplayName(userPayload.sub, displayName.trim());
+      return res.status(200).json({ message: "Profile updated successfully", displayName: displayName.trim() });
+    }
+
+    // ------------------------------------------------------------------------
+    // DELETE ACCOUNT
+    // ------------------------------------------------------------------------
+    if (method === "POST" && action === "delete-account") {
+      const authHeader = req.headers?.authorization;
+      const { userPayload } = await authenticateAndAuthorize(db, authHeader);
+      await db.deleteUser(userPayload.sub);
+      res.setHeader("Set-Cookie", formatClearRefreshCookie());
+      return res.status(200).json({ message: "Account deleted successfully" });
     }
 
     return res.status(400).json({ error: `Unsupported auth action: ${action}` });

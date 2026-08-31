@@ -20,13 +20,13 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     );
   }
 
-  // ❌ Not logged in AND not demo → kick to landing
+  // ❌ Not logged in AND not demo → redirect to auth page with return location state
   if (!user && !isDemo) {
     return (
       <Navigate
-        to="/"
+        to="/auth"
         replace
-        state={{ from: location.pathname }}
+        state={{ from: location }}
       />
     );
   }

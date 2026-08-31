@@ -50,19 +50,21 @@ test("PASCOAI ENTERPRISE OS — STAGE 8.1 SECURITY & RLS AUDIT SUITE", async (t)
   // --------------------------------------------------------------------------
   // TEST FIXTURES SETUP
   // --------------------------------------------------------------------------
+  const runId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
   // Organization A (Acme Cyber)
-  const orgA = await db.createOrganization("Acme Cyber Inc", "acme-cyber");
+  const orgA = await db.createOrganization("Acme Cyber Inc", `acme-cyber-${runId}`);
   const wsA1 = await db.createWorkspace(orgA.id, "Acme Production Perimeter", "production", true);
   const wsA2 = await db.createWorkspace(orgA.id, "Acme Staging Perimeter", "staging", false);
 
   // Organization B (Globex Defense)
-  const orgB = await db.createOrganization("Globex Defense Corp", "globex-defense");
+  const orgB = await db.createOrganization("Globex Defense Corp", `globex-defense-${runId}`);
   const wsB1 = await db.createWorkspace(orgB.id, "Globex Cloud Perimeter", "production", true);
 
   // Users in Org A
   const passwordHash = await hashPassword("ComplexPass123!_SecOps");
   const userAdminA = await db.createUser({
-    email: "admin@acme.com",
+    email: `admin-${runId}@acme.com`,
     display_name: "Acme Admin",
     password_hash: passwordHash,
     is_active: true,
@@ -71,7 +73,7 @@ test("PASCOAI ENTERPRISE OS — STAGE 8.1 SECURITY & RLS AUDIT SUITE", async (t)
   await db.addWorkspaceMember(orgA.id, wsA2.id, userAdminA.id, "org_admin");
 
   const userSecOpsA = await db.createUser({
-    email: "secops@acme.com",
+    email: `secops-${runId}@acme.com`,
     display_name: "Acme SecOps Analyst",
     password_hash: passwordHash,
     is_active: true,
@@ -79,7 +81,7 @@ test("PASCOAI ENTERPRISE OS — STAGE 8.1 SECURITY & RLS AUDIT SUITE", async (t)
   await db.addWorkspaceMember(orgA.id, wsA1.id, userSecOpsA.id, "secops_analyst");
 
   const userAuditorA = await db.createUser({
-    email: "auditor@acme.com",
+    email: `auditor-${runId}@acme.com`,
     display_name: "Acme Compliance Auditor",
     password_hash: passwordHash,
     is_active: true,
@@ -87,7 +89,7 @@ test("PASCOAI ENTERPRISE OS — STAGE 8.1 SECURITY & RLS AUDIT SUITE", async (t)
   await db.addWorkspaceMember(orgA.id, wsA1.id, userAuditorA.id, "compliance_auditor");
 
   const userViewerA = await db.createUser({
-    email: "viewer@acme.com",
+    email: `viewer-${runId}@acme.com`,
     display_name: "Acme Read Only Viewer",
     password_hash: passwordHash,
     is_active: true,
@@ -96,7 +98,7 @@ test("PASCOAI ENTERPRISE OS — STAGE 8.1 SECURITY & RLS AUDIT SUITE", async (t)
 
   // User in Org B
   const userAdminB = await db.createUser({
-    email: "admin@globex.com",
+    email: `admin-${runId}@globex.com`,
     display_name: "Globex Admin",
     password_hash: passwordHash,
     is_active: true,

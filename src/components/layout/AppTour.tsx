@@ -371,7 +371,10 @@ export function AppTour() {
 
     let finalTop = 0;
     let finalLeft = 0;
-    let finalPlacement: "top" | "bottom" | "left" | "right" = step.preferredPlacement || "bottom";
+    let finalPlacement: "top" | "bottom" | "left" | "right" =
+      step.preferredPlacement && step.preferredPlacement !== "auto"
+        ? step.preferredPlacement
+        : "bottom";
     let arrowOffset = 24;
 
     if (isMobile) {

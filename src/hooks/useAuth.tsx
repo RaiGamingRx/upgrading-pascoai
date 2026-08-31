@@ -1,36 +1,36 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from "react";
 
-interface User {
+export interface User {
   id: string;
   email: string;
   displayName?: string;
   lastLogin?: number;
-  password?: string;
+  role?: string;
+  organizationId?: string;
+  workspaceId?: string;
 }
 
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
+  accessToken: string | null;
+  isDemo: boolean;
 
   login: (email: string, password: string) => Promise<{ error: string | null }>;
-  signup: (email: string, password: string) => Promise<{ error: string | null }>;
+  signup: (email: string, password: string, displayName?: string, organizationName?: string) => Promise<{ error: string | null }>;
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<{ error: string | null }>;
   updatePassword: (oldPassword: string, newPassword: string) => Promise<{ error: string | null }>;
   deleteAccount: () => Promise<{ error: string | null }>;
 
   demoLogin: () => Promise<void>;
-
-  updateDisplayName: (name: string) => void;
-  isDemo: boolean;
+  updateDisplayName: (name: string) => Promise<void> | void;
+  getAccessToken: () => string | null;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const STORAGE_KEY = "pascoai_user";
-const USERS_KEY = "pascoai_users";
-
-/* ───────── Helpers ───────── */
+const DEMO_SESSION_KEY = "pasco_demo_session";
 
 const tempDomains = [
   "tempmail",
@@ -44,138 +44,247 @@ const tempDomains = [
 const isTempEmail = (email: string) =>
   tempDomains.some((d) => email.toLowerCase().includes(d));
 
-const hash = async (text: string) => {
-  const buf = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(text)
-  );
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-};
-
-const getUsers = (): User[] => {
-  try {
-    return JSON.parse(localStorage.getItem(USERS_KEY) || "[]");
-  } catch {
-    return [];
-  }
-};
-
-const saveUsers = (users: User[]) =>
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
-
-/* ───────── Provider ───────── */
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  // ───────── SESSION RESTORATION (Backend refresh + Demo memory) ─────────
   useEffect(() => {
+    let isMounted = true;
+
+    // Defense-in-depth: Clear obsolete legacy client-side user stores
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) setUser(JSON.parse(stored));
+      localStorage.removeItem("pascoai_users");
+      localStorage.removeItem("pascoai_user");
     } catch {
-      localStorage.removeItem(STORAGE_KEY);
+      // Ignore localStorage access errors
     }
-    setIsLoading(false);
+
+    async function restoreSession() {
+      try {
+        // 1. Check if temporary Demo Mode was active in this session
+        const isDemoActive = sessionStorage.getItem(DEMO_SESSION_KEY) === "true";
+        if (isDemoActive) {
+          if (isMounted) {
+            setUser({
+              id: "demo-user",
+              email: "demo@pascoai.com",
+              displayName: "Security Lead (Demo)",
+              lastLogin: Date.now(),
+              role: "security_lead",
+            });
+            setIsLoading(false);
+          }
+          return;
+        }
+
+        // 2. Real user session restoration via backend refresh endpoint
+        const res = await fetch("/api/auth?action=refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted && data.accessToken && data.user) {
+            setAccessToken(data.accessToken);
+            setUser({
+              id: data.user.id,
+              email: data.user.email,
+              displayName: data.user.displayName,
+              organizationId: data.tenant?.organizationId,
+              workspaceId: data.tenant?.workspaceId,
+              role: data.tenant?.role,
+              lastLogin: Date.now(),
+            });
+          }
+        } else {
+          if (isMounted) {
+            setUser(null);
+            setAccessToken(null);
+          }
+        }
+      } catch {
+        if (isMounted) {
+          setUser(null);
+          setAccessToken(null);
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    restoreSession();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
-  const persistUser = (u: User) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(u));
-    setUser(u);
-  };
-
-  /* ───────── LOGIN ───────── */
+  // ───────── REAL USER LOGIN (Backend Argon2id + PostgreSQL) ─────────
   const login = async (email: string, password: string) => {
-    await new Promise((r) => setTimeout(r, 400));
-
     if (!email || !password) {
       return { error: "Email and password are required" };
     }
 
-    const users = getUsers();
-    const found = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+    try {
+      const res = await fetch("/api/auth?action=login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
 
-    if (!found) {
-      return { error: "Account not found with this email" };
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "Authentication failed" };
+      }
+
+      sessionStorage.removeItem(DEMO_SESSION_KEY);
+      setAccessToken(data.accessToken);
+      setUser({
+        id: data.user.id,
+        email: data.user.email,
+        displayName: data.user.displayName,
+        organizationId: data.tenant?.organizationId,
+        workspaceId: data.tenant?.workspaceId,
+        role: data.tenant?.role,
+        lastLogin: Date.now(),
+      });
+
+      return { error: null };
+    } catch (err: any) {
+      return { error: err?.message || "Authentication service is currently unavailable" };
     }
-
-    const hashed = await hash(password);
-    if (found.password !== hashed) {
-      return { error: "Incorrect password" };
-    }
-
-    const logged = { ...found, lastLogin: Date.now() };
-    persistUser(logged);
-    return { error: null };
   };
 
-  /* ───────── SIGNUP ───────── */
-  const signup = async (email: string, password: string) => {
-    await new Promise((r) => setTimeout(r, 400));
-
-    if (!email.includes("@")) {
-      return { error: "Invalid email address" };
+  // ───────── REAL USER SIGNUP (Backend Argon2id + PostgreSQL) ─────────
+  const signup = async (
+    email: string,
+    password: string,
+    displayName?: string,
+    organizationName?: string
+  ) => {
+    if (!email || !email.includes("@")) {
+      return { error: "Valid email address is required" };
     }
 
     if (isTempEmail(email)) {
-      return { error: "Temporary emails are not allowed" };
+      return { error: "Disposable or temporary email domains are not allowed" };
     }
 
     if (password.length < 8) {
       return { error: "Password must be at least 8 characters" };
     }
 
-    const users = getUsers();
-    if (users.find((u) => u.email.toLowerCase() === email.toLowerCase())) {
-      return { error: "An account with this email already exists" };
+    const name = displayName?.trim() || email.split("@")[0];
+    const orgName = organizationName?.trim() || `${name}'s Security Perimeter`;
+
+    try {
+      const res = await fetch("/api/auth?action=register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(),
+          password,
+          displayName: name,
+          organizationName: orgName,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "Registration failed" };
+      }
+
+      sessionStorage.removeItem(DEMO_SESSION_KEY);
+      setAccessToken(data.accessToken);
+      setUser({
+        id: data.user.id,
+        email: data.user.email,
+        displayName: data.user.displayName,
+        organizationId: data.tenant?.organizationId,
+        workspaceId: data.tenant?.workspaceId,
+        role: data.tenant?.role,
+        lastLogin: Date.now(),
+      });
+
+      return { error: null };
+    } catch (err: any) {
+      return { error: err?.message || "Registration service is currently unavailable" };
     }
-
-    const newUser: User = {
-      id: crypto.randomUUID(),
-      email: email.trim().toLowerCase(),
-      password: await hash(password),
-      displayName: email.split("@")[0],
-      lastLogin: Date.now(),
-    };
-
-    users.push(newUser);
-    saveUsers(users);
-    persistUser(newUser);
-
-    return { error: null };
   };
 
-  /* ───────── DEMO MODE ───────── */
+  // ───────── DEMO MODE (Isolated Non-Persistent Session) ─────────
   const demoLogin = async () => {
-    const demoUser: User = {
+    sessionStorage.setItem(DEMO_SESSION_KEY, "true");
+    setAccessToken(null);
+    setUser({
       id: "demo-user",
       email: "demo@pascoai.com",
       displayName: "Security Lead (Demo)",
       lastLogin: Date.now(),
-    };
-
-    persistUser(demoUser);
+      role: "security_lead",
+    });
   };
 
-  /* ───────── UPDATE NAME ───────── */
-  const updateDisplayName = (name: string) => {
-    if (!user || user.id === "demo-user") return;
+  // ───────── REAL USER LOGOUT (Backend Revocation + Cookie Clear) ─────────
+  const logout = async () => {
+    try {
+      sessionStorage.removeItem(DEMO_SESSION_KEY);
+      await fetch("/api/auth?action=logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      });
+    } catch {
+      // Proceed with client logout even if network fails
+    } finally {
+      setAccessToken(null);
+      setUser(null);
+    }
+  };
+
+  // ───────── REAL USER UPDATE DISPLAY NAME ─────────
+  const updateDisplayName = async (name: string) => {
+    if (!user || user.id === "demo-user") {
+      if (user?.id === "demo-user") {
+        setUser((prev) => (prev ? { ...prev, displayName: name.trim() } : null));
+      }
+      return;
+    }
 
     const trimmed = name.trim();
-    const users = getUsers().map((u) =>
-      u.id === user.id ? { ...u, displayName: trimmed } : u
-    );
+    if (!trimmed) return;
 
-    saveUsers(users);
-    persistUser({ ...user, displayName: trimmed });
+    try {
+      const res = await fetch("/api/auth?action=update-profile", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        credentials: "include",
+        body: JSON.stringify({ displayName: trimmed }),
+      });
+
+      if (res.ok) {
+        setUser((prev) => (prev ? { ...prev, displayName: trimmed } : null));
+      }
+    } catch {
+      setUser((prev) => (prev ? { ...prev, displayName: trimmed } : null));
+    }
   };
 
-  /* ───────── UPDATE PASSWORD ───────── */
+  // ───────── REAL USER UPDATE PASSWORD ─────────
   const updatePassword = async (oldPassword: string, newPassword: string) => {
     if (!user || user.id === "demo-user") {
-      return { error: "Password changes disabled in demo mode" };
+      return { error: "Password changes are disabled in demo mode" };
     }
 
     if (!oldPassword || !newPassword) {
@@ -186,55 +295,63 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return { error: "New password must be at least 8 characters" };
     }
 
-    const users = getUsers();
-    const found = users.find((u) => u.id === user.id);
-    if (!found) {
-      return { error: "User account not found" };
+    try {
+      const res = await fetch("/api/auth?action=change-password", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        credentials: "include",
+        body: JSON.stringify({ oldPassword, newPassword }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "Failed to update password" };
+      }
+      return { error: null };
+    } catch (err: any) {
+      return { error: err?.message || "Failed to connect to authentication service" };
     }
-
-    const hashedOld = await hash(oldPassword);
-    if (found.password !== hashedOld) {
-      return { error: "Incorrect current password" };
-    }
-
-    const hashedNew = await hash(newPassword);
-    const updatedUsers = users.map((u) =>
-      u.id === user.id ? { ...u, password: hashedNew } : u
-    );
-
-    saveUsers(updatedUsers);
-    persistUser({ ...user, password: hashedNew });
-    return { error: null };
   };
 
-  /* ───────── DELETE ACCOUNT ───────── */
+  // ───────── REAL USER DELETE ACCOUNT ─────────
   const deleteAccount = async () => {
     if (!user || user.id === "demo-user") {
       return { error: "Cannot delete demo account" };
     }
 
-    const users = getUsers().filter((u) => u.id !== user.id);
-    saveUsers(users);
-    localStorage.removeItem(STORAGE_KEY);
-    setUser(null);
-    return { error: null };
+    try {
+      const res = await fetch("/api/auth?action=delete-account", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        credentials: "include",
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.error || "Failed to delete account" };
+      }
+      await logout();
+      return { error: null };
+    } catch (err: any) {
+      return { error: err?.message || "Failed to reach authentication service" };
+    }
   };
 
-  /* ───────── LOGOUT ───────── */
-  const logout = async () => {
-    localStorage.removeItem(STORAGE_KEY);
-    setUser(null);
-  };
-
-  /* ───────── RESET ───────── */
+  // ───────── RESET PASSWORD STUB ─────────
   const resetPassword = async (email: string) => {
-    await new Promise((r) => setTimeout(r, 400));
-    if (!email.includes("@")) {
+    if (!email || !email.includes("@")) {
       return { error: "Enter a valid email" };
     }
     return { error: null };
   };
 
+  const getAccessToken = useCallback(() => accessToken, [accessToken]);
   const isDemo = user?.id === "demo-user";
 
   return (
@@ -242,6 +359,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         isLoading,
+        accessToken,
         login,
         signup,
         logout,
@@ -250,6 +368,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         deleteAccount,
         demoLogin,
         updateDisplayName,
+        getAccessToken,
         isDemo,
       }}
     >

@@ -2,15 +2,23 @@
  * PASCOAI ENTERPRISE DATABASE & RLS ENGINE (STAGE 8.1)
  * 
  * Provides zero-trust, tenant-isolated data operations with strict
- * PostgreSQL Row-Level Security (RLS) enforcement.
+ * PostgreSQL Row-Level Security (RLS) enforcement and connection-pool isolation.
  * 
  * CRITICAL SECURITY GUARANTEES:
  * 1. Every tenant-owned query requires an authenticated context.
  * 2. If app.current_org_id or app.current_workspace_id is absent, queries FAIL CLOSED.
- * 3. PostgreSQL FORCE ROW LEVEL SECURITY semantics are strictly modeled and enforced.
+ * 3. PostgreSQL FORCE ROW LEVEL SECURITY semantics are strictly enforced by PostgreSQL.
+ * 4. Tenant session settings are STRICTLY transaction-scoped (set_config(..., true))
+ *    and cannot leak between pooled connections or requests.
+ * 5. Production mode MANDATES DATABASE_URL and refuses to start with in-memory fallback.
  */
 
 import { randomUUID } from "node:crypto";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import pg, { type PoolClient } from "pg";
+
+const { Pool } = pg;
 
 export interface TenantContext {
   organizationId: string;
@@ -126,9 +134,465 @@ export interface AuditLogRecord {
   timestamp: string;
 }
 
-/**
- * In-Memory RLS Engine Store for Development & Security Tests
- */
+// ----------------------------------------------------------------------------
+// POSTGRES CONNECTION POOL & MIGRATION RUNNER
+// ----------------------------------------------------------------------------
+
+let globalPool: pg.Pool | null = null;
+let migrationPromise: Promise<void> | null = null;
+
+export function getActiveDriver(): "postgres" | "in_memory" {
+  const isProduction = process.env.NODE_ENV === "production";
+  const hasDbUrl = typeof process.env.DATABASE_URL === "string" && process.env.DATABASE_URL.trim().length > 0;
+
+  if (isProduction && !hasDbUrl) {
+    throw new Error(
+      "FATAL_DATABASE_CONFIG_ERROR: DATABASE_URL environment variable is mandatory in production. In-memory database fallback is strictly prohibited."
+    );
+  }
+
+  if (hasDbUrl) {
+    return "postgres";
+  }
+
+  return "in_memory";
+}
+
+export function getPool(connectionUrl?: string): pg.Pool {
+  const driver = getActiveDriver();
+  if (driver !== "postgres") {
+    throw new Error("Cannot get PostgreSQL pool: Active driver is in_memory");
+  }
+
+  if (connectionUrl) {
+    const useSsl =
+      process.env.DATABASE_SSL === "true" ||
+      connectionUrl.includes("sslmode=require") ||
+      connectionUrl.includes("neon.tech");
+
+    return new Pool({
+      connectionString: connectionUrl,
+      ssl: useSsl ? { rejectUnauthorized: false } : undefined,
+      max: Number(process.env.PG_MAX_POOL_SIZE || 20),
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    });
+  }
+
+  if (!globalPool) {
+    const connectionString = process.env.DATABASE_URL!;
+    const useSsl =
+      process.env.DATABASE_SSL === "true" ||
+      connectionString.includes("sslmode=require") ||
+      connectionString.includes("neon.tech");
+    
+    globalPool = new Pool({
+      connectionString,
+      ssl: useSsl ? { rejectUnauthorized: false } : undefined,
+      max: Number(process.env.PG_MAX_POOL_SIZE || 20),
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    });
+
+    globalPool.on("error", (err) => {
+      console.error("[PostgreSQL Pool Error]", err);
+    });
+  }
+
+  return globalPool;
+}
+
+export async function closePool(): Promise<void> {
+  if (globalPool) {
+    await globalPool.end();
+    globalPool = null;
+    migrationPromise = null;
+  }
+}
+
+export const SCHEMA_SQL = `
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(64) UNIQUE NOT NULL,
+    tier VARCHAR(32) NOT NULL DEFAULT 'enterprise',
+    retention_days INT NOT NULL DEFAULT 365,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    environment VARCHAR(32) NOT NULL DEFAULT 'production',
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_workspaces_org ON workspaces(organization_id);
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email VARCHAR(320) UNIQUE NOT NULL,
+    display_name VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role VARCHAR(32) NOT NULL CHECK (role IN ('org_admin', 'security_lead', 'secops_analyst', 'compliance_auditor', 'viewer')),
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_workspace_user UNIQUE (workspace_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_members_lookup ON workspace_members(user_id, organization_id, workspace_id);
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    family_id UUID NOT NULL,
+    token_hash VARCHAR(64) NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    is_revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at TIMESTAMPTZ NULL
+);
+CREATE INDEX IF NOT EXISTS idx_refresh_token_family ON refresh_tokens(family_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_token_hash ON refresh_tokens(token_hash);
+
+CREATE TABLE IF NOT EXISTS assets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    target_type VARCHAR(32) NOT NULL CHECK (target_type IN ('domain', 'hostname', 'public_ip', 'url_endpoint', 'email_domain')),
+    target_value VARCHAR(2048) NOT NULL,
+    criticality VARCHAR(32) NOT NULL DEFAULT 'tier_2_business',
+    tags TEXT[] DEFAULT '{}',
+    current_score INT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_assets_workspace ON assets(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_assets_org ON assets(organization_id);
+
+CREATE TABLE IF NOT EXISTS scans (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    triggered_by UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+    scan_type VARCHAR(32) NOT NULL DEFAULT 'on_demand',
+    execution_status VARCHAR(32) NOT NULL DEFAULT 'queued',
+    overall_score INT NULL,
+    is_verified BOOLEAN NOT NULL DEFAULT TRUE,
+    raw_summary JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scans_workspace ON scans(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_scans_asset ON scans(asset_id);
+
+CREATE TABLE IF NOT EXISTS findings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    domain_category VARCHAR(64) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    severity VARCHAR(16) NOT NULL CHECK (severity IN ('critical', 'high', 'medium', 'low', 'info')),
+    verification_class VARCHAR(32) NOT NULL CHECK (verification_class IN ('VERIFIED_EVIDENCE', 'DETERMINISTIC_DERIVATION', 'AI_THREAT_ANALYSIS', 'TRAINING_SIMULATION', 'IMPORTED_UNVERIFIED')),
+    recommendation TEXT NOT NULL,
+    remediation_status VARCHAR(32) NOT NULL DEFAULT 'open',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_findings_workspace ON findings(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id UUID NULL REFERENCES workspaces(id) ON DELETE SET NULL,
+    actor_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+    actor_ip VARCHAR(45) NOT NULL,
+    action VARCHAR(128) NOT NULL,
+    resource_type VARCHAR(64) NOT NULL,
+    resource_id VARCHAR(64) NOT NULL,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_logs(organization_id);
+
+-- RLS Enablement & Enforcement
+ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE organizations FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspaces FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE workspace_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_members FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE assets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE assets FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE scans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE scans FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE findings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE findings FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs FORCE ROW LEVEL SECURITY;
+
+-- Idempotent RLS Policies
+DROP POLICY IF EXISTS rls_organizations_isolation ON organizations;
+CREATE POLICY rls_organizations_isolation ON organizations
+    FOR ALL
+    USING (
+        id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
+    );
+
+DROP POLICY IF EXISTS rls_workspaces_isolation ON workspaces;
+CREATE POLICY rls_workspaces_isolation ON workspaces
+    FOR ALL
+    USING (
+        organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
+        AND (
+            id = NULLIF(current_setting('app.current_workspace_id', true), '')::uuid
+            OR NULLIF(current_setting('app.current_workspace_id', true), '') IS NULL
+        )
+    );
+
+DROP POLICY IF EXISTS rls_workspace_members_isolation ON workspace_members;
+CREATE POLICY rls_workspace_members_isolation ON workspace_members
+    FOR ALL
+    USING (
+        organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
+        OR user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid
+    );
+
+DROP POLICY IF EXISTS rls_assets_isolation ON assets;
+CREATE POLICY rls_assets_isolation ON assets
+    FOR ALL
+    USING (
+        organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
+        AND workspace_id = NULLIF(current_setting('app.current_workspace_id', true), '')::uuid
+    );
+
+DROP POLICY IF EXISTS rls_scans_isolation ON scans;
+CREATE POLICY rls_scans_isolation ON scans
+    FOR ALL
+    USING (
+        organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
+        AND workspace_id = NULLIF(current_setting('app.current_workspace_id', true), '')::uuid
+    );
+
+DROP POLICY IF EXISTS rls_findings_isolation ON findings;
+CREATE POLICY rls_findings_isolation ON findings
+    FOR ALL
+    USING (
+        organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
+        AND workspace_id = NULLIF(current_setting('app.current_workspace_id', true), '')::uuid
+    );
+
+DROP POLICY IF EXISTS rls_audit_logs_isolation ON audit_logs;
+CREATE POLICY rls_audit_logs_isolation ON audit_logs
+    FOR ALL
+    USING (
+        organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
+    );
+`;
+
+export async function runMigrations(pool?: pg.Pool): Promise<void> {
+  const targetPool =
+    pool ||
+    (process.env.DATABASE_URL_UNPOOLED ? getPool(process.env.DATABASE_URL_UNPOOLED) : getPool());
+  
+  if (!migrationPromise) {
+    migrationPromise = (async () => {
+      let migrationSql = SCHEMA_SQL;
+      const migrationFilePath = resolve(process.cwd(), "migrations/001_enterprise_multitenant_schema.sql");
+      if (existsSync(migrationFilePath)) {
+        try {
+          migrationSql = readFileSync(migrationFilePath, "utf-8");
+        } catch {
+          // Fall back to SCHEMA_SQL constant
+        }
+      }
+      
+      const client = await targetPool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(migrationSql);
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    })();
+  }
+
+  return migrationPromise;
+}
+
+// ----------------------------------------------------------------------------
+// DATA MAPPING UTILITIES
+// ----------------------------------------------------------------------------
+
+function toIso(val: any): string {
+  if (!val) return new Date().toISOString();
+  if (val instanceof Date) return val.toISOString();
+  return String(val);
+}
+
+function toIsoOrNull(val: any): string | null {
+  if (!val) return null;
+  if (val instanceof Date) return val.toISOString();
+  return String(val);
+}
+
+function mapOrganization(row: any): OrganizationRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    tier: row.tier,
+    retention_days: Number(row.retention_days),
+    created_at: toIso(row.created_at),
+    updated_at: toIso(row.updated_at),
+  };
+}
+
+function mapWorkspace(row: any): WorkspaceRecord {
+  return {
+    id: row.id,
+    organization_id: row.organization_id,
+    name: row.name,
+    environment: row.environment,
+    is_default: Boolean(row.is_default),
+    created_at: toIso(row.created_at),
+    updated_at: toIso(row.updated_at),
+  };
+}
+
+function mapUser(row: any): UserRecord {
+  return {
+    id: row.id,
+    email: row.email,
+    display_name: row.display_name,
+    password_hash: row.password_hash,
+    is_active: Boolean(row.is_active),
+    created_at: toIso(row.created_at),
+    updated_at: toIso(row.updated_at),
+  };
+}
+
+function mapWorkspaceMember(row: any): WorkspaceMemberRecord {
+  return {
+    id: row.id,
+    organization_id: row.organization_id,
+    workspace_id: row.workspace_id,
+    user_id: row.user_id,
+    role: row.role,
+    joined_at: toIso(row.joined_at),
+  };
+}
+
+function mapRefreshToken(row: any): RefreshTokenRecord {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    family_id: row.family_id,
+    token_hash: row.token_hash,
+    expires_at: toIso(row.expires_at),
+    is_revoked: Boolean(row.is_revoked),
+    created_at: toIso(row.created_at),
+    revoked_at: toIsoOrNull(row.revoked_at),
+  };
+}
+
+function mapAsset(row: any): AssetRecord {
+  return {
+    id: row.id,
+    organization_id: row.organization_id,
+    workspace_id: row.workspace_id,
+    target_type: row.target_type,
+    target_value: row.target_value,
+    criticality: row.criticality,
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    current_score: row.current_score !== null && row.current_score !== undefined ? Number(row.current_score) : null,
+    status: row.status,
+    created_at: toIso(row.created_at),
+    updated_at: toIso(row.updated_at),
+  };
+}
+
+function mapScan(row: any): ScanRecord {
+  return {
+    id: row.id,
+    organization_id: row.organization_id,
+    workspace_id: row.workspace_id,
+    asset_id: row.asset_id,
+    triggered_by: row.triggered_by || null,
+    scan_type: row.scan_type,
+    execution_status: row.execution_status,
+    overall_score: row.overall_score !== null && row.overall_score !== undefined ? Number(row.overall_score) : null,
+    is_verified: Boolean(row.is_verified),
+    raw_summary: typeof row.raw_summary === "object" && row.raw_summary !== null ? row.raw_summary : {},
+    created_at: toIso(row.created_at),
+    completed_at: toIsoOrNull(row.completed_at),
+  };
+}
+
+function mapFinding(row: any): FindingRecord {
+  return {
+    id: row.id,
+    organization_id: row.organization_id,
+    workspace_id: row.workspace_id,
+    scan_id: row.scan_id,
+    domain_category: row.domain_category,
+    title: row.title,
+    description: row.description,
+    severity: row.severity,
+    verification_class: row.verification_class,
+    recommendation: row.recommendation,
+    remediation_status: row.remediation_status,
+    created_at: toIso(row.created_at),
+  };
+}
+
+function mapAuditLog(row: any): AuditLogRecord {
+  return {
+    id: row.id,
+    organization_id: row.organization_id,
+    workspace_id: row.workspace_id || null,
+    actor_id: row.actor_id || null,
+    actor_ip: row.actor_ip,
+    action: row.action,
+    resource_type: row.resource_type,
+    resource_id: row.resource_id,
+    details: typeof row.details === "object" && row.details !== null ? row.details : {},
+    timestamp: toIso(row.timestamp),
+  };
+}
+
+// ----------------------------------------------------------------------------
+// IN-MEMORY STORE (Isolated fallback strictly for development & unit test runners)
+// ----------------------------------------------------------------------------
+
 class InMemoryEnterpriseDb {
   organizations = new Map<string, OrganizationRecord>();
   workspaces = new Map<string, WorkspaceRecord>();
@@ -155,9 +619,10 @@ class InMemoryEnterpriseDb {
 
 export const inMemoryDb = new InMemoryEnterpriseDb();
 
-/**
- * Enterprise Database Client with Mandatory Context Enforcement (RLS)
- */
+// ----------------------------------------------------------------------------
+// ENTERPRISE DATABASE CLIENT
+// ----------------------------------------------------------------------------
+
 export class EnterpriseDbClient {
   private context: TenantContext | null;
 
@@ -166,8 +631,7 @@ export class EnterpriseDbClient {
   }
 
   /**
-   * Internal check verifying tenant context exists and is valid
-   * FAILS CLOSED if context is missing.
+   * Returns current tenant context or FAILS CLOSED
    */
   private requireContext(): TenantContext {
     if (!this.context) {
@@ -179,11 +643,93 @@ export class EnterpriseDbClient {
     return this.context;
   }
 
+  /**
+   * Executes a callback within a strict, transaction-scoped PostgreSQL tenant context.
+   * Session variables are set with is_local=true, guaranteeing zero connection leakage.
+   */
+  private async withTenantTransaction<T>(fn: (client: PoolClient, ctx: TenantContext) => Promise<T>): Promise<T> {
+    const ctx = this.requireContext();
+    const pool = getPool();
+    await runMigrations(pool);
+    const client = await pool.connect();
+    
+    try {
+      await client.query("BEGIN");
+      // Set transaction-local session variables for PostgreSQL RLS policies
+      await client.query(
+        `SELECT 
+          set_config('app.current_org_id', $1, true),
+          set_config('app.current_workspace_id', $2, true),
+          set_config('app.current_user_id', $3, true),
+          set_config('app.current_user_role', $4, true)`,
+        [ctx.organizationId, ctx.workspaceId, ctx.userId, ctx.role]
+      );
+      
+      const result = await fn(client, ctx);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      // Defensive reset of all session settings before connection returns to pool
+      await client.query("RESET ALL").catch(() => {});
+      client.release();
+    }
+  }
+
+  /**
+   * Executes a callback within a system transaction (e.g. for registration, token management)
+   */
+  private async withSystemTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const pool = getPool();
+    await runMigrations(pool);
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      const result = await fn(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      await client.query("RESET ALL").catch(() => {});
+      client.release();
+    }
+  }
+
   // --------------------------------------------------------------------------
-  // USER / AUTH OPS (System Level & Context-Guarded)
+  // USER / AUTH OPERATIONS
   // --------------------------------------------------------------------------
+
   async createUser(data: Omit<UserRecord, 'id' | 'created_at' | 'updated_at'>): Promise<UserRecord> {
-    const existing = Array.from(inMemoryDb.users.values()).find(u => u.email.toLowerCase() === data.email.toLowerCase());
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        const existing = await client.query(
+          "SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+          [data.email]
+        );
+        if (existing.rows.length > 0) {
+          throw new Error("User with this email already exists");
+        }
+        const id = randomUUID();
+        const res = await client.query(
+          `INSERT INTO users (id, email, display_name, password_hash, is_active, created_at, updated_at)
+           VALUES ($1, LOWER($2), $3, $4, $5, NOW(), NOW())
+           RETURNING *`,
+          [id, data.email, data.display_name, data.password_hash, data.is_active ?? true]
+        );
+        return mapUser(res.rows[0]);
+      });
+    }
+
+    // In-memory fallback
+    const existing = Array.from(inMemoryDb.users.values()).find(
+      u => u.email.toLowerCase() === data.email.toLowerCase()
+    );
     if (existing) {
       throw new Error("User with this email already exists");
     }
@@ -203,18 +749,116 @@ export class EnterpriseDbClient {
   }
 
   async findUserByEmail(email: string): Promise<UserRecord | null> {
-    const found = Array.from(inMemoryDb.users.values()).find(u => u.email.toLowerCase() === email.toLowerCase());
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        "SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+        [email]
+      );
+      if (res.rows.length === 0) return null;
+      return mapUser(res.rows[0]);
+    }
+
+    const found = Array.from(inMemoryDb.users.values()).find(
+      u => u.email.toLowerCase() === email.toLowerCase()
+    );
     return found || null;
   }
 
   async findUserById(userId: string): Promise<UserRecord | null> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        "SELECT * FROM users WHERE id = $1 LIMIT 1",
+        [userId]
+      );
+      if (res.rows.length === 0) return null;
+      return mapUser(res.rows[0]);
+    }
+
     return inMemoryDb.users.get(userId) || null;
+  }
+
+  async updateUserPassword(userId: string, newPasswordHash: string): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        await client.query(
+          "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+          [newPasswordHash, userId]
+        );
+      });
+    }
+
+    const user = inMemoryDb.users.get(userId);
+    if (user) {
+      user.password_hash = newPasswordHash;
+      user.updated_at = new Date().toISOString();
+    }
+  }
+
+  async updateUserDisplayName(userId: string, displayName: string): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        await client.query(
+          "UPDATE users SET display_name = $1, updated_at = NOW() WHERE id = $2",
+          [displayName, userId]
+        );
+      });
+    }
+
+    const user = inMemoryDb.users.get(userId);
+    if (user) {
+      user.display_name = displayName;
+      user.updated_at = new Date().toISOString();
+    }
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        await client.query("UPDATE refresh_tokens SET is_revoked = TRUE, revoked_at = NOW() WHERE user_id = $1", [userId]);
+        await client.query("DELETE FROM workspace_members WHERE user_id = $1", [userId]);
+        await client.query("DELETE FROM users WHERE id = $1", [userId]);
+      });
+    }
+
+    inMemoryDb.users.delete(userId);
+    for (const [id, m] of inMemoryDb.workspaceMembers.entries()) {
+      if (m.user_id === userId) inMemoryDb.workspaceMembers.delete(id);
+    }
+    for (const [id, t] of inMemoryDb.refreshTokens.entries()) {
+      if (t.user_id === userId) inMemoryDb.refreshTokens.delete(id);
+    }
   }
 
   // --------------------------------------------------------------------------
   // ORGANIZATION & WORKSPACE OPS
   // --------------------------------------------------------------------------
+
   async createOrganization(name: string, slug: string, tier = 'enterprise'): Promise<OrganizationRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const id = randomUUID();
+      return this.withSystemTransaction(async (client) => {
+        // Set org context to satisfy RLS during initial organization insert
+        await client.query("SELECT set_config('app.current_org_id', $1, true)", [id]);
+        const res = await client.query(
+          `INSERT INTO organizations (id, name, slug, tier, retention_days, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+           RETURNING *`,
+          [id, name, slug, tier, 365]
+        );
+        return mapOrganization(res.rows[0]);
+      });
+    }
+
     const id = randomUUID();
     const now = new Date().toISOString();
     const org: OrganizationRecord = {
@@ -231,6 +875,21 @@ export class EnterpriseDbClient {
   }
 
   async createWorkspace(orgId: string, name: string, environment = 'production', isDefault = false): Promise<WorkspaceRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const id = randomUUID();
+      return this.withSystemTransaction(async (client) => {
+        await client.query("SELECT set_config('app.current_org_id', $1, true)", [orgId]);
+        const res = await client.query(
+          `INSERT INTO workspaces (id, organization_id, name, environment, is_default, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+           RETURNING *`,
+          [id, orgId, name, environment, isDefault]
+        );
+        return mapWorkspace(res.rows[0]);
+      });
+    }
+
     const id = randomUUID();
     const now = new Date().toISOString();
     const ws: WorkspaceRecord = {
@@ -247,6 +906,21 @@ export class EnterpriseDbClient {
   }
 
   async addWorkspaceMember(orgId: string, workspaceId: string, userId: string, role: WorkspaceMemberRecord['role']): Promise<WorkspaceMemberRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const id = randomUUID();
+      return this.withSystemTransaction(async (client) => {
+        await client.query("SELECT set_config('app.current_org_id', $1, true)", [orgId]);
+        const res = await client.query(
+          `INSERT INTO workspace_members (id, organization_id, workspace_id, user_id, role, joined_at)
+           VALUES ($1, $2, $3, $4, $5, NOW())
+           RETURNING *`,
+          [id, orgId, workspaceId, userId, role]
+        );
+        return mapWorkspaceMember(res.rows[0]);
+      });
+    }
+
     const id = randomUUID();
     const member: WorkspaceMemberRecord = {
       id,
@@ -261,13 +935,40 @@ export class EnterpriseDbClient {
   }
 
   async getUserMemberships(userId: string): Promise<WorkspaceMemberRecord[]> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        await client.query("SELECT set_config('app.current_user_id', $1, true)", [userId]);
+        const res = await client.query(
+          "SELECT * FROM workspace_members WHERE user_id = $1 ORDER BY joined_at ASC",
+          [userId]
+        );
+        return res.rows.map(mapWorkspaceMember);
+      });
+    }
+
     return Array.from(inMemoryDb.workspaceMembers.values()).filter(m => m.user_id === userId);
   }
 
   // --------------------------------------------------------------------------
   // REFRESH TOKEN ROTATION & TOKEN FAMILIES
   // --------------------------------------------------------------------------
+
   async saveRefreshToken(userId: string, familyId: string, tokenHash: string, expiresAt: Date): Promise<RefreshTokenRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const id = randomUUID();
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        `INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, expires_at, is_revoked, created_at, revoked_at)
+         VALUES ($1, $2, $3, $4, $5, FALSE, NOW(), NULL)
+         RETURNING *`,
+        [id, userId, familyId, tokenHash, expiresAt.toISOString()]
+      );
+      return mapRefreshToken(res.rows[0]);
+    }
+
     const id = randomUUID();
     const record: RefreshTokenRecord = {
       id,
@@ -284,11 +985,37 @@ export class EnterpriseDbClient {
   }
 
   async findRefreshTokenByHash(tokenHash: string): Promise<RefreshTokenRecord | null> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        "SELECT * FROM refresh_tokens WHERE token_hash = $1 LIMIT 1",
+        [tokenHash]
+      );
+      if (res.rows.length === 0) return null;
+      return mapRefreshToken(res.rows[0]);
+    }
+
     const found = Array.from(inMemoryDb.refreshTokens.values()).find(t => t.token_hash === tokenHash);
     return found || null;
   }
 
   async revokeTokenFamily(familyId: string): Promise<number> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        `UPDATE refresh_tokens 
+         SET is_revoked = TRUE, revoked_at = NOW() 
+         WHERE family_id = $1 AND is_revoked = FALSE
+         RETURNING id`,
+        [familyId]
+      );
+      return res.rowCount || 0;
+    }
+
     let count = 0;
     const now = new Date().toISOString();
     for (const record of inMemoryDb.refreshTokens.values()) {
@@ -302,6 +1029,17 @@ export class EnterpriseDbClient {
   }
 
   async consumeRefreshToken(recordId: string): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      await pool.query(
+        "UPDATE refresh_tokens SET is_revoked = TRUE, revoked_at = NOW() WHERE id = $1",
+        [recordId]
+      );
+      return;
+    }
+
     const record = inMemoryDb.refreshTokens.get(recordId);
     if (record) {
       record.is_revoked = true;
@@ -312,18 +1050,41 @@ export class EnterpriseDbClient {
   // --------------------------------------------------------------------------
   // ASSET OPERATIONS (RLS ENFORCED)
   // --------------------------------------------------------------------------
+
   async getAssets(): Promise<AssetRecord[]> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const res = await client.query(
+          "SELECT * FROM assets WHERE organization_id = $1 AND workspace_id = $2 ORDER BY created_at DESC",
+          [ctx.organizationId, ctx.workspaceId]
+        );
+        return res.rows.map(mapAsset);
+      });
+    }
+
     const ctx = this.requireContext();
-    // PostgreSQL RLS: organization_id = ctx.organizationId AND workspace_id = ctx.workspaceId
     return Array.from(inMemoryDb.assets.values()).filter(
       a => a.organization_id === ctx.organizationId && a.workspace_id === ctx.workspaceId
     );
   }
 
   async getAssetById(assetId: string): Promise<AssetRecord | null> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        // Postgres RLS will return 0 rows if assetId belongs to another org or workspace
+        const res = await client.query(
+          "SELECT * FROM assets WHERE id = $1 AND organization_id = $2 AND workspace_id = $3 LIMIT 1",
+          [assetId, ctx.organizationId, ctx.workspaceId]
+        );
+        if (res.rows.length === 0) return null;
+        return mapAsset(res.rows[0]);
+      });
+    }
+
     const ctx = this.requireContext();
     const asset = inMemoryDb.assets.get(assetId);
-    // RLS Enforcement: If asset belongs to another org or workspace, return null (404 without disclosure)
     if (!asset || asset.organization_id !== ctx.organizationId || asset.workspace_id !== ctx.workspaceId) {
       return null;
     }
@@ -336,6 +1097,28 @@ export class EnterpriseDbClient {
     criticality?: AssetRecord['criticality'];
     tags?: string[];
   }): Promise<AssetRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const id = randomUUID();
+        const res = await client.query(
+          `INSERT INTO assets (id, organization_id, workspace_id, target_type, target_value, criticality, tags, current_score, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, 'active', NOW(), NOW())
+           RETURNING *`,
+          [
+            id,
+            ctx.organizationId,
+            ctx.workspaceId,
+            data.targetType,
+            data.targetValue,
+            data.criticality || 'tier_2_business',
+            data.tags || [],
+          ]
+        );
+        return mapAsset(res.rows[0]);
+      });
+    }
+
     const ctx = this.requireContext();
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -356,11 +1139,45 @@ export class EnterpriseDbClient {
     return asset;
   }
 
-  async updateAsset(assetId: string, data: Partial<Pick<AssetRecord, 'target_value' | 'criticality' | 'tags' | 'status' | 'current_score'>>): Promise<AssetRecord | null> {
+  async updateAsset(
+    assetId: string,
+    data: Partial<Pick<AssetRecord, 'target_value' | 'criticality' | 'tags' | 'status' | 'current_score'>>
+  ): Promise<AssetRecord | null> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const existing = await client.query(
+          "SELECT * FROM assets WHERE id = $1 AND organization_id = $2 AND workspace_id = $3 LIMIT 1",
+          [assetId, ctx.organizationId, ctx.workspaceId]
+        );
+        if (existing.rows.length === 0) return null;
+
+        const current = existing.rows[0];
+        const res = await client.query(
+          `UPDATE assets
+           SET target_value = $1, criticality = $2, tags = $3, status = $4, current_score = $5, updated_at = NOW()
+           WHERE id = $6 AND organization_id = $7 AND workspace_id = $8
+           RETURNING *`,
+          [
+            data.target_value !== undefined ? data.target_value : current.target_value,
+            data.criticality !== undefined ? data.criticality : current.criticality,
+            data.tags !== undefined ? data.tags : current.tags,
+            data.status !== undefined ? data.status : current.status,
+            data.current_score !== undefined ? data.current_score : current.current_score,
+            assetId,
+            ctx.organizationId,
+            ctx.workspaceId,
+          ]
+        );
+        if (res.rows.length === 0) return null;
+        return mapAsset(res.rows[0]);
+      });
+    }
+
     const ctx = this.requireContext();
     const asset = inMemoryDb.assets.get(assetId);
     if (!asset || asset.organization_id !== ctx.organizationId || asset.workspace_id !== ctx.workspaceId) {
-      return null; // RLS denial
+      return null;
     }
     if (data.target_value !== undefined) asset.target_value = data.target_value;
     if (data.criticality !== undefined) asset.criticality = data.criticality;
@@ -372,10 +1189,21 @@ export class EnterpriseDbClient {
   }
 
   async deleteAsset(assetId: string): Promise<boolean> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const res = await client.query(
+          "DELETE FROM assets WHERE id = $1 AND organization_id = $2 AND workspace_id = $3 RETURNING id",
+          [assetId, ctx.organizationId, ctx.workspaceId]
+        );
+        return (res.rowCount || 0) > 0;
+      });
+    }
+
     const ctx = this.requireContext();
     const asset = inMemoryDb.assets.get(assetId);
     if (!asset || asset.organization_id !== ctx.organizationId || asset.workspace_id !== ctx.workspaceId) {
-      return false; // RLS denial
+      return false;
     }
     inMemoryDb.assets.delete(assetId);
     return true;
@@ -384,6 +1212,7 @@ export class EnterpriseDbClient {
   // --------------------------------------------------------------------------
   // SCANS & FINDINGS (RLS ENFORCED)
   // --------------------------------------------------------------------------
+
   async createScan(data: {
     assetId: string;
     scanType?: ScanRecord['scan_type'];
@@ -391,8 +1220,41 @@ export class EnterpriseDbClient {
     overallScore?: number | null;
     rawSummary?: Record<string, unknown>;
   }): Promise<ScanRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        // Verify asset exists in this tenant workspace
+        const assetRes = await client.query(
+          "SELECT id FROM assets WHERE id = $1 AND organization_id = $2 AND workspace_id = $3 LIMIT 1",
+          [data.assetId, ctx.organizationId, ctx.workspaceId]
+        );
+        if (assetRes.rows.length === 0) {
+          throw new Error("Asset not found in current workspace");
+        }
+
+        const id = randomUUID();
+        const res = await client.query(
+          `INSERT INTO scans (id, organization_id, workspace_id, asset_id, triggered_by, scan_type, execution_status, overall_score, is_verified, raw_summary, created_at, completed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+           RETURNING *`,
+          [
+            id,
+            ctx.organizationId,
+            ctx.workspaceId,
+            data.assetId,
+            ctx.userId,
+            data.scanType || 'on_demand',
+            data.isVerified === false ? 'imported' : 'verified',
+            data.overallScore !== undefined ? data.overallScore : null,
+            data.isVerified !== undefined ? data.isVerified : true,
+            JSON.stringify(data.rawSummary || {}),
+          ]
+        );
+        return mapScan(res.rows[0]);
+      });
+    }
+
     const ctx = this.requireContext();
-    // Validate that asset exists in tenant workspace
     const asset = await this.getAssetById(data.assetId);
     if (!asset) {
       throw new Error("Asset not found in current workspace");
@@ -418,6 +1280,17 @@ export class EnterpriseDbClient {
   }
 
   async getScans(): Promise<ScanRecord[]> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const res = await client.query(
+          "SELECT * FROM scans WHERE organization_id = $1 AND workspace_id = $2 ORDER BY created_at DESC",
+          [ctx.organizationId, ctx.workspaceId]
+        );
+        return res.rows.map(mapScan);
+      });
+    }
+
     const ctx = this.requireContext();
     return Array.from(inMemoryDb.scans.values()).filter(
       s => s.organization_id === ctx.organizationId && s.workspace_id === ctx.workspaceId
@@ -433,6 +1306,39 @@ export class EnterpriseDbClient {
     verificationClass: FindingRecord['verification_class'];
     recommendation: string;
   }): Promise<FindingRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const scanRes = await client.query(
+          "SELECT id FROM scans WHERE id = $1 AND organization_id = $2 AND workspace_id = $3 LIMIT 1",
+          [data.scanId, ctx.organizationId, ctx.workspaceId]
+        );
+        if (scanRes.rows.length === 0) {
+          throw new Error("Target scan not found in tenant workspace");
+        }
+
+        const id = randomUUID();
+        const res = await client.query(
+          `INSERT INTO findings (id, organization_id, workspace_id, scan_id, domain_category, title, description, severity, verification_class, recommendation, remediation_status, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', NOW())
+           RETURNING *`,
+          [
+            id,
+            ctx.organizationId,
+            ctx.workspaceId,
+            data.scanId,
+            data.domainCategory,
+            data.title,
+            data.description,
+            data.severity,
+            data.verificationClass,
+            data.recommendation,
+          ]
+        );
+        return mapFinding(res.rows[0]);
+      });
+    }
+
     const ctx = this.requireContext();
     const scan = inMemoryDb.scans.get(data.scanId);
     if (!scan || scan.organization_id !== ctx.organizationId || scan.workspace_id !== ctx.workspaceId) {
@@ -458,6 +1364,17 @@ export class EnterpriseDbClient {
   }
 
   async getFindings(): Promise<FindingRecord[]> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const res = await client.query(
+          "SELECT * FROM findings WHERE organization_id = $1 AND workspace_id = $2 ORDER BY created_at DESC",
+          [ctx.organizationId, ctx.workspaceId]
+        );
+        return res.rows.map(mapFinding);
+      });
+    }
+
     const ctx = this.requireContext();
     return Array.from(inMemoryDb.findings.values()).filter(
       f => f.organization_id === ctx.organizationId && f.workspace_id === ctx.workspaceId
@@ -467,7 +1384,38 @@ export class EnterpriseDbClient {
   // --------------------------------------------------------------------------
   // AUDIT LOGS (RLS ENFORCED)
   // --------------------------------------------------------------------------
-  async logAuditEvent(action: string, resourceType: string, resourceId: string, details: Record<string, unknown> = {}, actorIp = '127.0.0.1'): Promise<AuditLogRecord> {
+
+  async logAuditEvent(
+    action: string,
+    resourceType: string,
+    resourceId: string,
+    details: Record<string, unknown> = {},
+    actorIp = '127.0.0.1'
+  ): Promise<AuditLogRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const id = randomUUID();
+        const res = await client.query(
+          `INSERT INTO audit_logs (id, organization_id, workspace_id, actor_id, actor_ip, action, resource_type, resource_id, details, timestamp)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+           RETURNING *`,
+          [
+            id,
+            ctx.organizationId,
+            ctx.workspaceId,
+            ctx.userId,
+            actorIp,
+            action,
+            resourceType,
+            resourceId,
+            JSON.stringify(details),
+          ]
+        );
+        return mapAuditLog(res.rows[0]);
+      });
+    }
+
     const ctx = this.requireContext();
     const id = randomUUID();
     const log: AuditLogRecord = {
@@ -487,6 +1435,17 @@ export class EnterpriseDbClient {
   }
 
   async getAuditLogs(): Promise<AuditLogRecord[]> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withTenantTransaction(async (client, ctx) => {
+        const res = await client.query(
+          "SELECT * FROM audit_logs WHERE organization_id = $1 ORDER BY timestamp DESC",
+          [ctx.organizationId]
+        );
+        return res.rows.map(mapAuditLog);
+      });
+    }
+
     const ctx = this.requireContext();
     return Array.from(inMemoryDb.auditLogs.values()).filter(
       l => l.organization_id === ctx.organizationId

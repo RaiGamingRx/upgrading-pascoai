@@ -57,7 +57,7 @@ function fromB64Url(b64url: string): Uint8Array {
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   assertWebCrypto();
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  const hash = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return Array.from(new Uint8Array(hash))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
@@ -70,7 +70,7 @@ async function deriveKey(password: string, salt: Uint8Array, iterations: number)
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt,
+      salt: salt as BufferSource,
       iterations,
       hash: "SHA-256",
     },
@@ -112,7 +112,7 @@ export async function encryptText(
   const key = await deriveKey(opts.password, salt, iterations);
 
   const pt = utf8Encode(text);
-  const ctBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, pt);
+  const ctBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, pt as BufferSource);
   const ctBytes = new Uint8Array(ctBuf);
 
   const header: PascoHeader = {
@@ -194,7 +194,7 @@ export async function decryptToken(token: string, password: string): Promise<Dec
 
   let ptBuf: ArrayBuffer;
   try {
-    ptBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ctBytes);
+    ptBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv as BufferSource }, key, ctBytes as BufferSource);
   } catch {
     throw new Error("Wrong key or corrupted token.");
   }
@@ -234,7 +234,7 @@ export function downloadText(text: string, filename: string) {
 }
 
 export function downloadBytes(bytes: Uint8Array, filename: string, mime = "application/octet-stream") {
-  const blob = new Blob([bytes], { type: mime });
+  const blob = new Blob([bytes as unknown as BlobPart], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

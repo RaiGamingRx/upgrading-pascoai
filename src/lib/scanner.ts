@@ -64,7 +64,7 @@ export function parseScanResult(value: unknown): RealScanResult {
     return { category: category.category, icon: category.icon as CategoryResult["icon"], findings };
   });
 
-  return { target: value.target, score: value.score, status: value.status as ScanStatus, scannedAt: value.scannedAt, results };
+  return { target: value.target, score: value.score as number | null, status: value.status as ScanStatus, scannedAt: value.scannedAt, results };
 }
 
 export async function runRealScan(target: string): Promise<RealScanResult> {
