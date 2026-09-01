@@ -40,22 +40,63 @@ export default async function scansHandler(
         SecurityAction.RUN_SCAN
       );
       const tenantDb = new EnterpriseDbClient(context);
-      const { assetId, overallScore, rawSummary } = req.body || {};
+      const { target, targetValue, targetType, overallScore, rawSummary, findings, isVerified } = req.body || {};
+      let resolvedAssetId = req.body?.assetId;
 
-      if (!assetId) {
-        return res.status(400).json({ error: "assetId is required" });
+      if (!resolvedAssetId && (target || targetValue)) {
+        const val = (target || targetValue).trim().toLowerCase();
+        const type = targetType || 'domain';
+        const existingAssets = await tenantDb.getAssets();
+        const found = existingAssets.find(a => a.target_value.toLowerCase() === val);
+        if (found) {
+          resolvedAssetId = found.id;
+          if (overallScore !== undefined && overallScore !== null) {
+            await tenantDb.updateAsset(resolvedAssetId, { current_score: overallScore });
+          }
+        } else {
+          const created = await tenantDb.createAsset({
+            targetType: type,
+            targetValue: val,
+            criticality: 'tier_2_business',
+            tags: ['verified_probe'],
+          });
+          resolvedAssetId = created.id;
+          if (overallScore !== undefined && overallScore !== null) {
+            await tenantDb.updateAsset(resolvedAssetId, { current_score: overallScore });
+          }
+        }
+      }
+
+      if (!resolvedAssetId) {
+        return res.status(400).json({ error: "assetId or target is required" });
       }
 
       const scan = await tenantDb.createScan({
-        assetId,
+        assetId: resolvedAssetId,
         scanType: 'on_demand',
-        isVerified: true,
-        overallScore,
+        isVerified: isVerified !== undefined ? isVerified : true,
+        overallScore: overallScore !== undefined ? overallScore : null,
         rawSummary,
       });
 
-      await tenantDb.logAuditEvent('scan.initiated', 'scan', scan.id, { assetId });
-      return res.status(201).json(scan);
+      const createdFindings = [];
+      if (Array.isArray(findings) && findings.length > 0) {
+        for (const f of findings) {
+          const createdFinding = await tenantDb.createFinding({
+            scanId: scan.id,
+            domainCategory: f.domainCategory || f.category || 'Recon',
+            title: f.title || 'Security Finding',
+            description: f.description || '',
+            severity: f.severity || 'low',
+            verificationClass: f.verificationClass || (isVerified === false ? 'IMPORTED_UNVERIFIED' : 'VERIFIED_EVIDENCE'),
+            recommendation: f.recommendation || 'Remediate detected observation.',
+          });
+          createdFindings.push(createdFinding);
+        }
+      }
+
+      await tenantDb.logAuditEvent('scan.initiated', 'scan', scan.id, { assetId: resolvedAssetId, score: overallScore });
+      return res.status(201).json({ scan, findings: createdFindings });
     }
 
     return res.status(405).json({ error: "Method not allowed" });

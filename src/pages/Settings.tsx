@@ -9,6 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
   Select,
@@ -17,10 +18,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Download, Shield, Trash2, User, LogOut, AlertTriangle, Key, Compass, RotateCcw } from "lucide-react";
+import { Download, Shield, Trash2, User, LogOut, AlertTriangle, Key, Compass, RotateCcw, Database, Cloud, UploadCloud, CheckCircle2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { useNavigate } from "react-router-dom";
+import { migrationApi } from "@/lib/api";
 
 type ExportFormat = "json" | "txt";
 
@@ -36,6 +38,10 @@ export default function Settings() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
 
+  /* ---------------- MIGRATION / CLOUD PERSISTENCE ---------------- */
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationStatus, setMigrationStatus] = useState<string | null>(null);
+
   /* ---------------- EXPORT SETTINGS ---------------- */
   const [exportFormat, setExportFormat] = useState<ExportFormat>("json");
 
@@ -49,6 +55,47 @@ export default function Settings() {
     if (savedExport === "json" || savedExport === "txt") setExportFormat(savedExport);
     if (savedPersona) setPersona(savedPersona);
   }, []);
+
+  const handleMigrateLegacyData = async () => {
+    if (isDemo || !user) {
+      toast.error("Cloud persistence is only active for authenticated users.");
+      return;
+    }
+
+    setIsMigrating(true);
+    setMigrationStatus("Collecting browser audit history...");
+
+    try {
+      const v1Scans = JSON.parse(localStorage.getItem("pasco_scan_history_v1") || "[]");
+      const v2Scans = JSON.parse(localStorage.getItem("pasco_scanner_history_v2") || "[]");
+      const webScans = JSON.parse(localStorage.getItem("pasco_websec_history_v1") || "[]");
+      const emailScans = JSON.parse(localStorage.getItem("pasco_email_history_v1") || "[]");
+
+      const payload = {
+        scannerHistory: [...v1Scans, ...v2Scans],
+        websecHistory: webScans,
+        emailHistory: emailScans,
+      };
+
+      const result = await migrationApi.importLegacy(payload);
+
+      // Clean up legacy localStorage keys
+      localStorage.removeItem("pasco_scan_history_v1");
+      localStorage.removeItem("pasco_scanner_history_v2");
+      localStorage.removeItem("pasco_websec_history_v1");
+      localStorage.removeItem("pasco_email_history_v1");
+
+      setMigrationStatus(
+        `Imported ${result.metrics.importedAssets} assets, ${result.metrics.importedScans} scans, and ${result.metrics.importedFindings} findings into PostgreSQL.`
+      );
+      toast.success("Legacy telemetry successfully migrated to Neon PostgreSQL!");
+    } catch (err: any) {
+      toast.error(err?.message || "Migration failed");
+      setMigrationStatus(null);
+    } finally {
+      setIsMigrating(false);
+    }
+  };
 
   /* ---------------- CHANGE PASSWORD ---------------- */
   const handleChangePassword = async () => {
@@ -338,6 +385,57 @@ export default function Settings() {
             </Button>
             <Button variant="outline" size="sm" onClick={() => exportData("persona")}>
               Export Persona
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Cloud Persistence & Migration */}
+      <Card variant="cyber">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Cloud className="w-5 h-5 text-cyan-400" />
+            Enterprise Cloud Persistence & Database
+            {user && !isDemo ? (
+              <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-500/30 gap-1 ml-auto">
+                <Database className="w-3 h-3" /> Neon PostgreSQL Connected
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-[10px] text-amber-400 border-amber-500/30 gap-1 ml-auto">
+                Demo Memory Mode
+              </Badge>
+            )}
+          </CardTitle>
+          <CardDescription>
+            {user && !isDemo
+              ? `Tenant Organization ID: ${user.organizationId || "Default"} • Workspace: ${user.workspaceId || "Primary"} • Role: ${user.role || "Operator"}`
+              : "Demo Mode is isolated from PostgreSQL database writes to preserve system integrity."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-xl bg-card border border-border/80">
+            <div>
+              <p className="font-semibold text-foreground text-sm flex items-center gap-2">
+                Migrate Local Browser Audits to PostgreSQL
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5 max-w-xl">
+                Transfer any previous local scan reports, host perimeter checks, and email audits into your secure Neon PostgreSQL multi-tenant database.
+              </p>
+              {migrationStatus && (
+                <p className="text-xs text-cyan-400 mt-2 font-mono flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  {migrationStatus}
+                </p>
+              )}
+            </div>
+            <Button
+              variant="outline"
+              disabled={isDemo || isMigrating}
+              onClick={handleMigrateLegacyData}
+              className="gap-2 shrink-0 border-cyan-500/40 text-cyan-400 hover:bg-cyan-500/10 hover:border-cyan-400"
+            >
+              {isMigrating ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+              {isMigrating ? "Migrating Data..." : "Import to Cloud DB"}
             </Button>
           </div>
         </CardContent>

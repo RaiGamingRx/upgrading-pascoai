@@ -29,10 +29,13 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { analyzeEmail, type EmailScanResult } from "@/lib/email";
+import { useAuth } from "@/hooks/useAuth";
+import { scansApi } from "@/lib/api";
 
 const HISTORY_KEY = "pasco_email_history_v1";
 
 export default function EmailSecurity() {
+  const { user, isDemo } = useAuth();
   const [email, setEmail] = useState("");
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
@@ -74,7 +77,35 @@ export default function EmailSecurity() {
 
       const updated = [r, ...history.filter((h) => h.email !== r.email)].slice(0, 15);
       setHistory(updated);
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+
+      if (user && !isDemo) {
+        // REAL USER: Persist into Neon PostgreSQL
+        try {
+          await scansApi.create({
+            target: r.domain || r.email,
+            targetType: "email_domain",
+            overallScore: r.score,
+            isVerified: true,
+            rawSummary: {
+              provider: r.provider,
+              disposable: r.disposable,
+              scannedAt: r.scannedAt,
+            },
+            findings: (r.flags || []).map((flag: any) => ({
+              domainCategory: "Email Anti-Spoofing",
+              title: flag.title || flag.message,
+              description: flag.message || flag.title,
+              severity: flag.level === "critical" || flag.level === "high" ? "high" : "medium",
+              recommendation: "Configure SPF TXT, DKIM, and strict DMARC p=quarantine/reject policies.",
+              verificationClass: "VERIFIED_EVIDENCE",
+            })),
+          });
+        } catch (dbErr) {
+          console.error("Failed to persist email scan to Neon:", dbErr);
+        }
+      } else {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+      }
 
       toast.success("Email & domain security verification complete!");
     } catch (e: any) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { RevealOnScroll } from "@/components/motion/RevealOnScroll";
 import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
@@ -9,7 +9,9 @@ import { SecurityCharts, type TimelineDataPoint, type SeverityCount, type Catego
 import { AIBriefingSection } from "@/components/dashboard/AIBriefingSection";
 import { SecuritySuitesGrid } from "@/components/dashboard/SecuritySuitesGrid";
 import { ActivityTimeline, type UnifiedActivityItem } from "@/components/dashboard/ActivityTimeline";
-import { generateExecutiveReport } from "@/lib/reportModel";
+import { generateExecutiveReport, type StoredAuditData } from "@/lib/reportModel";
+import { useAuth } from "@/hooks/useAuth";
+import { scansApi, assetsApi } from "@/lib/api";
 import {
   Shield,
   FileText,
@@ -19,6 +21,8 @@ import {
   Lock,
   Key,
   Search,
+  Database,
+  Cloud,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -57,6 +61,7 @@ function timeAgo(dateStringOrTimestamp: string | number): string {
 }
 
 export default function Dashboard() {
+  const { user, isDemo } = useAuth();
   const [scanHistory, setScanHistory] = useState<Record<string, unknown>[]>([]);
   const [websecHistory, setWebsecHistory] = useState<Record<string, unknown>[]>([]);
   const [emailHistory, setEmailHistory] = useState<Record<string, unknown>[]>([]);
@@ -65,36 +70,98 @@ export default function Dashboard() {
   const [researchHistory, setResearchHistory] = useState<Record<string, unknown>[]>([]);
   const [simHistory, setSimHistory] = useState<Record<string, unknown>[]>([]);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+  const [isLoadingPlatformData, setIsLoadingPlatformData] = useState(false);
 
-  // Load real telemetry data from localStorage
-  const loadPlatformHistory = () => {
-    const v1Scans = safeJson<Record<string, unknown>[]>(localStorage.getItem(SCAN_HISTORY_KEY), []);
-    const v2Scans = safeJson<Record<string, unknown>[]>(localStorage.getItem(SCAN_HISTORY_V2_KEY), []);
-    const combinedScans = Array.isArray(v1Scans) && v1Scans.length > 0 ? v1Scans : v2Scans;
+  // Load telemetry data according to authentication state
+  const loadPlatformData = useCallback(async () => {
+    if (user && !isDemo) {
+      // REAL USER: Query Neon PostgreSQL via authenticated RLS endpoints
+      setIsLoadingPlatformData(true);
+      try {
+        const [{ scans, findings }, { assets }] = await Promise.all([
+          scansApi.list(),
+          assetsApi.list(),
+        ]);
 
-    setScanHistory(combinedScans);
-    setWebsecHistory(safeJson(localStorage.getItem(WEBSEC_HISTORY_KEY), []));
-    setEmailHistory(safeJson(localStorage.getItem(EMAIL_HISTORY_KEY), []));
-    setCryptoHistory(safeJson(localStorage.getItem(CRYPTO_HISTORY_KEY), []));
-    setPasswordHistory(safeJson(localStorage.getItem(PASSWORD_HISTORY_KEY), []));
-    setResearchHistory(safeJson(localStorage.getItem(RESEARCH_HISTORY_KEY), []));
-    setSimHistory(safeJson(localStorage.getItem(SIMULATIONS_HISTORY_KEY), []));
-  };
+        const assetMap = new Map<string, string>();
+        assets.forEach((a: any) => assetMap.set(a.id, a.target_value || a.targetValue));
+
+        const formattedScans: Record<string, unknown>[] = (scans || []).map((s: any) => {
+          const target = assetMap.get(s.asset_id || s.assetId) || "Host";
+          const scanFindings = (findings || []).filter((f: any) => (f.scan_id || f.scanId) === s.id);
+          return {
+            id: s.id,
+            target,
+            score: s.overall_score !== null && s.overall_score !== undefined ? Number(s.overall_score) : null,
+            scannedAt: s.created_at || s.createdAt,
+            date: s.created_at || s.createdAt,
+            results: [
+              {
+                category: "Host Reconnaissance",
+                findings: scanFindings.map((f: any) => ({
+                  title: f.title,
+                  description: f.description,
+                  severity: f.severity,
+                  recommendation: f.recommendation,
+                  verificationClass: f.verification_class,
+                })),
+              },
+            ],
+          };
+        });
+
+        setScanHistory(formattedScans);
+        setWebsecHistory([]);
+        setEmailHistory([]);
+        setCryptoHistory([]);
+        setPasswordHistory([]);
+        setResearchHistory([]);
+        setSimHistory([]);
+      } catch (err) {
+        console.error("Failed to load real user telemetry from Neon:", err);
+      } finally {
+        setIsLoadingPlatformData(false);
+      }
+    } else {
+      // DEMO USER: Load from demo localStorage / memory only (ZERO Neon reads)
+      const v1Scans = safeJson<Record<string, unknown>[]>(localStorage.getItem(SCAN_HISTORY_KEY), []);
+      const v2Scans = safeJson<Record<string, unknown>[]>(localStorage.getItem(SCAN_HISTORY_V2_KEY), []);
+      const combinedScans = Array.isArray(v1Scans) && v1Scans.length > 0 ? v1Scans : v2Scans;
+
+      setScanHistory(combinedScans);
+      setWebsecHistory(safeJson(localStorage.getItem(WEBSEC_HISTORY_KEY), []));
+      setEmailHistory(safeJson(localStorage.getItem(EMAIL_HISTORY_KEY), []));
+      setCryptoHistory(safeJson(localStorage.getItem(CRYPTO_HISTORY_KEY), []));
+      setPasswordHistory(safeJson(localStorage.getItem(PASSWORD_HISTORY_KEY), []));
+      setResearchHistory(safeJson(localStorage.getItem(RESEARCH_HISTORY_KEY), []));
+      setSimHistory(safeJson(localStorage.getItem(SIMULATIONS_HISTORY_KEY), []));
+    }
+  }, [user, isDemo]);
 
   useEffect(() => {
-    loadPlatformHistory();
+    loadPlatformData();
 
-    // Listen for storage events across tabs
-    const onStorageChange = () => {
-      loadPlatformHistory();
-    };
-    window.addEventListener("storage", onStorageChange);
-    return () => window.removeEventListener("storage", onStorageChange);
-  }, []);
+    if (isDemo || !user) {
+      const onStorageChange = () => {
+        loadPlatformData();
+      };
+      window.addEventListener("storage", onStorageChange);
+      return () => window.removeEventListener("storage", onStorageChange);
+    }
+  }, [loadPlatformData, isDemo, user]);
 
-  // Compute normalized Executive Security Report from real audit storage
+  // Compute normalized Executive Security Report from audit storage / Neon records
   const executiveReport = useMemo(() => {
-    return generateExecutiveReport({ selectedTarget: "__ALL__" });
+    const customStorageData: StoredAuditData = {
+      scannerHistory: scanHistory,
+      websecHistory,
+      emailHistory,
+      cryptoHistory,
+      passwordHistory,
+      researchHistory,
+      simulationHistory: simHistory,
+    };
+    return generateExecutiveReport({ selectedTarget: "__ALL__", storageData: customStorageData });
   }, [scanHistory, websecHistory, emailHistory, cryptoHistory, passwordHistory, researchHistory, simHistory]);
 
   // Aggregate Metrics & Health Status

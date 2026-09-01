@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,9 +31,12 @@ import {
   Network,
   AlertTriangle,
   FileText,
+  Cloud,
 } from "lucide-react";
 import { toast } from "sonner";
 import { runRealScan, type RealScanResult, type ScanStatus } from "@/lib/scanner";
+import { useAuth } from "@/hooks/useAuth";
+import { scansApi, assetsApi } from "@/lib/api";
 
 interface ScanResultUI {
   category: string;
@@ -48,9 +51,9 @@ interface ScanResultUI {
   }[];
 }
 
-type HistoryItem = { target: string; date: string; score: number; status: ScanStatus };
+type HistoryItem = { target: string; date: string; score: number; status: ScanStatus; source?: "cloud" | "demo" };
 
-const HISTORY_KEY = "pasco_scan_history_v1";
+const DEMO_HISTORY_KEY = "pasco_demo_scan_history_v1";
 
 function isTargetFormatValid(value: string) {
   try {
@@ -70,6 +73,7 @@ function todayISO() {
 }
 
 export default function Scanner() {
+  const { user, isDemo } = useAuth();
   const [target, setTarget] = useState("");
   const [isScanning, setIsScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState(0);
@@ -79,34 +83,97 @@ export default function Scanner() {
   const [lastScanTarget, setLastScanTarget] = useState("");
   const [lastScannedAt, setLastScannedAt] = useState("");
   const [scanHistory, setScanHistory] = useState<HistoryItem[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const scanInFlight = useRef(false);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          setScanHistory(parsed.filter((item): item is HistoryItem =>
-            item && typeof item.target === "string" && typeof item.date === "string" && typeof item.score === "number" &&
-            ["verified", "partial", "failed", "unavailable"].includes(item.status ?? "verified")
-          ).map((item) => ({ ...item, status: item.status ?? "verified" })));
-        }
+  // Load history based on auth context
+  const loadHistory = useCallback(async () => {
+    if (user && !isDemo) {
+      // REAL USER: Load directly from Neon PostgreSQL via authenticated API
+      setIsLoadingHistory(true);
+      try {
+        const [{ scans }, { assets }] = await Promise.all([
+          scansApi.list(),
+          assetsApi.list(),
+        ]);
+
+        const assetMap = new Map<string, string>();
+        assets.forEach((a: any) => assetMap.set(a.id, a.target_value || a.targetValue));
+
+        const historyItems: HistoryItem[] = (scans || [])
+          .filter((s: any) => s.overall_score !== null && s.overall_score !== undefined)
+          .map((s: any) => {
+            const targetVal = assetMap.get(s.asset_id || s.assetId) || "Hostname";
+            const dateStr = s.created_at || s.createdAt || new Date().toISOString();
+            const execStatus = s.execution_status || s.executionStatus;
+            const status: ScanStatus =
+              execStatus === "verified"
+                ? "verified"
+                : execStatus === "partial"
+                ? "partial"
+                : execStatus === "failed"
+                ? "failed"
+                : "verified";
+
+            return {
+              target: targetVal,
+              date: typeof dateStr === "string" ? dateStr.slice(0, 10) : todayISO(),
+              score: Number(s.overall_score ?? s.overallScore),
+              status,
+              source: "cloud",
+            };
+          });
+
+        setScanHistory(historyItems.slice(0, 15));
+      } catch (err) {
+        console.error("Failed to load authenticated scans from Neon:", err);
+      } finally {
+        setIsLoadingHistory(false);
       }
-    } catch {
-      // ignore
+    } else {
+      // DEMO USER: Load from isolated session storage (ZERO Neon reads/writes)
+      try {
+        const raw = sessionStorage.getItem(DEMO_HISTORY_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            setScanHistory(
+              parsed
+                .filter(
+                  (item): item is HistoryItem =>
+                    item &&
+                    typeof item.target === "string" &&
+                    typeof item.date === "string" &&
+                    typeof item.score === "number" &&
+                    ["verified", "partial", "failed", "unavailable"].includes(item.status ?? "verified")
+                )
+                .map((item) => ({ ...item, status: item.status ?? "verified", source: "demo" }))
+            );
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
-  }, []);
+  }, [user, isDemo]);
+
+  useEffect(() => {
+    loadHistory();
+  }, [loadHistory]);
 
   const clearScanHistory = () => {
-    try {
-      localStorage.removeItem(HISTORY_KEY);
-      localStorage.removeItem("pasco_scanner_history_v2");
-    } catch {
-      // ignore
+    if (isDemo || !user) {
+      try {
+        sessionStorage.removeItem(DEMO_HISTORY_KEY);
+      } catch {
+        // ignore
+      }
+      setScanHistory([]);
+      toast.success("Demo scan history cleared");
+    } else {
+      setScanHistory([]);
+      toast.success("Workspace scan view refreshed");
     }
-    setScanHistory([]);
-    toast.success("Scan history cleared");
   };
 
   const iconMap: Record<string, React.ElementType> = useMemo(
@@ -163,10 +230,50 @@ export default function Scanner() {
       setLastScannedAt(res.scannedAt);
 
       if (res.score != null) {
-        const item: HistoryItem = { target: res.target, date: todayISO(), score: res.score, status: res.status };
-        const updated = [item, ...scanHistory.filter((x) => x.target !== item.target)].slice(0, 15);
-        setScanHistory(updated);
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+        const item: HistoryItem = {
+          target: res.target,
+          date: todayISO(),
+          score: res.score,
+          status: res.status,
+          source: user && !isDemo ? "cloud" : "demo",
+        };
+
+        if (user && !isDemo) {
+          // REAL USER: Persist into Neon PostgreSQL via authenticated RLS pipeline
+          try {
+            await scansApi.create({
+              target: res.target,
+              targetType: "hostname",
+              overallScore: res.score,
+              isVerified: res.status === "verified",
+              rawSummary: {
+                status: res.status,
+                scannedAt: res.scannedAt,
+                totalFindings: res.results.reduce((acc, c) => acc + c.findings.length, 0),
+              },
+              findings: res.results.flatMap((cat) =>
+                cat.findings.map((f) => ({
+                  domainCategory: cat.category,
+                  title: f.title,
+                  description: f.description,
+                  severity: f.severity,
+                  recommendation: f.recommendation,
+                  verificationClass: f.status === "verified" ? "VERIFIED_EVIDENCE" : "IMPORTED_UNVERIFIED",
+                }))
+              ),
+            });
+            // Update state
+            setScanHistory((prev) => [item, ...prev.filter((x) => x.target !== item.target)].slice(0, 15));
+          } catch (dbErr) {
+            console.error("Failed to persist scan to Neon PostgreSQL:", dbErr);
+            toast.error("Scan verified, but failed to save record to cloud database.");
+          }
+        } else {
+          // DEMO USER: Session-only storage (ZERO Neon writes)
+          const updated = [item, ...scanHistory.filter((x) => x.target !== item.target)].slice(0, 15);
+          setScanHistory(updated);
+          sessionStorage.setItem(DEMO_HISTORY_KEY, JSON.stringify(updated));
+        }
       }
 
       toast[res.status === "verified" ? "success" : "warning"](`Security scan ${res.status}.`);

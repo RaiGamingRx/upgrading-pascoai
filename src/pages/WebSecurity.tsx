@@ -32,6 +32,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { scanWebsite, type WebSecurityResult } from "@/lib/webSecurity";
+import { useAuth } from "@/hooks/useAuth";
+import { scansApi } from "@/lib/api";
 
 const HISTORY_KEY = "pasco_websec_history_v1";
 
@@ -63,6 +65,7 @@ const HEADER_DEFINITIONS: Record<string, { purpose: string; recommend: string }>
 };
 
 export default function WebSecurity() {
+  const { user, isDemo } = useAuth();
   const [url, setUrl] = useState("https://example.com");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -104,7 +107,35 @@ export default function WebSecurity() {
 
       const updated = [r, ...history.filter((h) => h.url !== r.url)].slice(0, 15);
       setHistory(updated);
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+
+      if (user && !isDemo) {
+        // REAL USER: Persist into Neon PostgreSQL
+        try {
+          await scansApi.create({
+            target: r.finalUrl || r.url,
+            targetType: "url_endpoint",
+            overallScore: r.score,
+            isVerified: true,
+            rawSummary: {
+              statusCode: r.statusCode,
+              https: r.https,
+              scannedAt: r.scannedAt,
+            },
+            findings: (r.issues || []).map((issue: string) => ({
+              domainCategory: "Web & TLS Hardening",
+              title: issue,
+              description: `Observed issue during web security assessment: ${issue}`,
+              severity: issue.toLowerCase().includes("certificate") || issue.toLowerCase().includes("https") ? "high" : "medium",
+              recommendation: "Apply recommended TLS and HTTP security header hardening.",
+              verificationClass: "VERIFIED_EVIDENCE",
+            })),
+          });
+        } catch (dbErr) {
+          console.error("Failed to persist web scan to Neon:", dbErr);
+        }
+      } else {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+      }
 
       toast.success(`Web security audit complete (Score: ${r.score}/100)`);
     } catch (e: any) {

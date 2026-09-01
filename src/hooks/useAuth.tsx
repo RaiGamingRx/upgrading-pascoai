@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from "react";
+import { apiClient } from "@/lib/api";
 
 export interface User {
   id: string;
@@ -351,8 +352,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null };
   };
 
-  const getAccessToken = useCallback(() => accessToken, [accessToken]);
   const isDemo = user?.id === "demo-user";
+  const getAccessToken = useCallback(() => accessToken, [accessToken]);
+
+  useEffect(() => {
+    apiClient.setAccessToken(accessToken);
+    apiClient.setIsDemo(isDemo);
+  }, [accessToken, isDemo]);
+
+  useEffect(() => {
+    const unsub = apiClient.onTokenChange((token) => {
+      if (token !== accessToken) {
+        setAccessToken(token);
+      }
+    });
+    return unsub;
+  }, [accessToken]);
 
   return (
     <AuthContext.Provider
