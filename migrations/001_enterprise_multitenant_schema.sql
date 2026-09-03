@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS users (
     display_name VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255) NOT NULL, -- Argon2id hash
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    token_version INT NOT NULL DEFAULT 1,
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_secret VARCHAR(512) NULL,
+    mfa_backup_codes TEXT[] DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -74,12 +79,43 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     token_hash VARCHAR(64) NOT NULL, -- SHA-256 of refresh token
     expires_at TIMESTAMPTZ NOT NULL,
     is_revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    revocation_reason VARCHAR(64) NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     revoked_at TIMESTAMPTZ NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_refresh_token_family ON refresh_tokens(family_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_token_hash ON refresh_tokens(token_hash);
+
+-- ------------------------------------------------------------------------------
+-- 5.1 PASSWORD RESET TOKENS (Hashed at rest, single-use, short-lived)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_reset_token_hash ON password_reset_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_reset_token_user ON password_reset_tokens(user_id);
+
+-- ------------------------------------------------------------------------------
+-- 5.2 EMAIL VERIFICATION TOKENS (Hashed at rest, single-use)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_verify_hash ON email_verification_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_email_verify_user ON email_verification_tokens(user_id);
 
 -- ------------------------------------------------------------------------------
 -- 6. ASSETS (Tenant Perimeter Inventory)
@@ -250,3 +286,14 @@ CREATE POLICY rls_audit_logs_isolation ON audit_logs
     USING (
         organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
     );
+
+-- ------------------------------------------------------------------------------
+-- 9. BACKWARDS-COMPATIBLE COLUMN ADDITIONS FOR EXISTING DATABASES
+-- ------------------------------------------------------------------------------
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 1;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret VARCHAR(512) NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_backup_codes TEXT[] DEFAULT '{}';
+ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS revocation_reason VARCHAR(64) NULL;
+

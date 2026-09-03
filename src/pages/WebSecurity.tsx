@@ -33,7 +33,7 @@ import {
 import { toast } from "sonner";
 import { scanWebsite, type WebSecurityResult } from "@/lib/webSecurity";
 import { useAuth } from "@/hooks/useAuth";
-import { scansApi } from "@/lib/api";
+import { scansApi, assetsApi } from "@/lib/api";
 
 const HISTORY_KEY = "pasco_websec_history_v1";
 
@@ -73,19 +73,72 @@ export default function WebSecurity() {
   const [history, setHistory] = useState<WebSecurityResult[]>([]);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (raw) setHistory(JSON.parse(raw));
-    } catch {
-      // ignore
+    let cancelled = false;
+    async function load() {
+      if (user && !isDemo) {
+        try {
+          const [scansRes, assetsRes] = await Promise.all([
+            scansApi.list().catch(() => ({ scans: [] })),
+            assetsApi.list().catch(() => ({ assets: [] })),
+          ]);
+          if (cancelled) return;
+          const assets = assetsRes.assets || [];
+          const assetMap = new Map<string, string>();
+          assets.forEach((a: any) => assetMap.set(a.id, a.target_value || a.targetValue));
+
+          const webScans = (scansRes.scans || [])
+            .filter((s: any) => {
+              const target = (assetMap.get(s.asset_id || s.assetId) || "").toLowerCase();
+              return target.startsWith("http://") || target.startsWith("https://") || target.includes("/");
+            })
+            .map((s: any) => {
+              const target = assetMap.get(s.asset_id || s.assetId) || "Website";
+              const raw = typeof s.raw_summary === "string" ? JSON.parse(s.raw_summary) : (s.raw_summary || s.rawSummary || {});
+              const score = s.overall_score !== null && s.overall_score !== undefined ? Number(s.overall_score) : (raw.legacyScore ?? 80);
+              return {
+                url: target,
+                finalUrl: target,
+                redirects: [],
+                score,
+                grade: (raw.legacyGrade || (score >= 80 ? "A" : score >= 60 ? "B" : "C")) as any,
+                statusCode: raw.statusCode || 200,
+                statusText: "OK",
+                https: target.startsWith("https"),
+                headers: {},
+                certificate: null,
+                dns: [],
+                issues: [],
+                recommendations: [],
+                headerStatus: {},
+                cookieFindings: [],
+                allowedMethods: ["GET", "POST", "HEAD"],
+                scannedAt: s.created_at || s.createdAt || new Date().toISOString(),
+              } as WebSecurityResult;
+            });
+          setHistory(webScans.slice(0, 15));
+        } catch {
+          // ignore
+        }
+      } else {
+        try {
+          const raw = localStorage.getItem(HISTORY_KEY);
+          if (raw) setHistory(JSON.parse(raw));
+        } catch {
+          // ignore
+        }
+      }
     }
-  }, []);
+    load();
+    return () => { cancelled = true; };
+  }, [user, isDemo]);
 
   const clearHistory = () => {
-    try {
-      localStorage.removeItem(HISTORY_KEY);
-    } catch {
-      // ignore
+    if (isDemo || !user) {
+      try {
+        localStorage.removeItem(HISTORY_KEY);
+      } catch {
+        // ignore
+      }
     }
     setHistory([]);
     toast.success("Web security history cleared");

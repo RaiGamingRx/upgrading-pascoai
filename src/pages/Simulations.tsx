@@ -11,6 +11,8 @@ import { GlassPanel } from "@/components/motion/GlassPanel";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { RevealOnScroll } from "@/components/motion/RevealOnScroll";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
+import { useAuth } from "@/hooks/useAuth";
+import { scansApi } from "@/lib/api";
 import {
   Shield,
   KeyRound,
@@ -1345,15 +1347,42 @@ export default function Simulations() {
   const [visualRunning, setVisualRunning] = useState(false);
   const [speedMs, setSpeedMs] = useState(80);
 
+  /* ---------------- Auth & Tenant Context ---------------- */
+  const { user, isDemo } = useAuth();
+
   const [history, setHistory] = useState<RunHistoryItem[]>([]);
 
   // safe user inputs
   const [inputs, setInputs] = useState<SimInputs>(() => defaultInputsForCategory("password"));
 
   useEffect(() => {
-    const saved = safeJson<RunHistoryItem[]>(localStorage.getItem(HISTORY_KEY), []);
-    setHistory(Array.isArray(saved) ? saved.slice(0, MAX_HISTORY) : []);
-  }, []);
+    if (user && !isDemo) {
+      // REAL USER: Query simulation history from authenticated Neon PostgreSQL database
+      scansApi.list()
+        .then(({ scans }) => {
+          const simScans = (scans || []).filter(
+            (s: any) => s.raw_summary?.type === "security_simulation" || s.rawSummary?.type === "security_simulation"
+          );
+          const formatted: RunHistoryItem[] = simScans.map((s: any) => {
+            const raw = s.raw_summary || s.rawSummary || {};
+            return {
+              toolId: raw.toolId || "unknown",
+              categoryId: raw.categoryId || "general",
+              title: raw.title || "Security Simulation",
+              date: raw.date || (s.created_at ? s.created_at.slice(0, 10) : todayISO()),
+            };
+          });
+          setHistory(formatted.slice(0, MAX_HISTORY));
+        })
+        .catch((err) => {
+          console.error("Failed to load simulation history from Neon:", err);
+        });
+    } else {
+      // DEMO USER: Load from local browser storage / memory (ZERO Neon reads)
+      const saved = safeJson<RunHistoryItem[]>(localStorage.getItem(HISTORY_KEY), []);
+      setHistory(Array.isArray(saved) ? saved.slice(0, MAX_HISTORY) : []);
+    }
+  }, [user, isDemo]);
 
   const activeCategory = useMemo(
     () => categories.find((c) => c.id === activeCategoryId) ?? categories[0],
@@ -1390,7 +1419,13 @@ export default function Simulations() {
   }, [inputs.learningMode]);
 
   const clearHistory = () => {
-    localStorage.removeItem(HISTORY_KEY);
+    if (isDemo || !user) {
+      try {
+        localStorage.removeItem(HISTORY_KEY);
+      } catch {
+        // ignore
+      }
+    }
     setHistory([]);
     toast.success("Simulation history cleared");
   };
@@ -1404,7 +1439,42 @@ export default function Simulations() {
     };
     const next = [item, ...history].slice(0, MAX_HISTORY);
     setHistory(next);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+
+    if (user && !isDemo) {
+      // REAL USER: Persist simulation run to Neon via authenticated RLS endpoint
+      scansApi.create({
+        target: "security_simulations",
+        targetType: "url_endpoint",
+        isVerified: true,
+        overallScore: null,
+        rawSummary: {
+          type: "security_simulation",
+          toolId: tool.id,
+          categoryId: activeCategoryId,
+          title: tool.title,
+          date: todayISO(),
+          risk: tool.risk,
+          impact: tool.impact,
+        },
+        findings: [{
+          domainCategory: "DEFENSE_SIMULATION",
+          title: `Simulation: ${tool.title}`,
+          description: `Interactive defense simulation completed: ${tool.short}`,
+          severity: tool.risk === "HIGH" ? "medium" : tool.risk === "MEDIUM" ? "low" : "info",
+          verificationClass: "TRAINING_SIMULATION",
+          recommendation: tool.howToBeSafe?.[0] || "Follow standard hardening procedures.",
+        }],
+      }).catch((err) => {
+        console.error("Failed to persist simulation run to Neon:", err);
+      });
+    } else {
+      // DEMO USER: Store in local browser storage only (ZERO Neon writes)
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+    }
   };
 
   const resetRunUI = () => {

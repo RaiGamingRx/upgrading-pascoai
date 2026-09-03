@@ -10,6 +10,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PasswordStrengthMeter } from "@/components/PasswordStrengthMeter";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
+import { useAuth } from "@/hooks/useAuth";
+import { scansApi } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Key,
@@ -55,6 +57,9 @@ const PASSWORD_HISTORY_KEY = "pasco_password_history_v1";
 const LEGACY_PASSWORD_KEY = "pasco_password_breaches";
 
 export default function PasswordLab() {
+  /* ---------------- Auth & Tenant Context ---------------- */
+  const { user, isDemo } = useAuth();
+
   /* ---------------- Analyzer ---------------- */
   const [password, setPassword] = useState("");
 
@@ -84,27 +89,55 @@ export default function PasswordLab() {
   const [breachHistory, setBreachHistory] = useState<BreachHistoryItem[]>([]);
 
   useEffect(() => {
-    try {
-      const raw =
-        localStorage.getItem(PASSWORD_HISTORY_KEY) ||
-        localStorage.getItem(LEGACY_PASSWORD_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          setBreachHistory(parsed);
+    if (user && !isDemo) {
+      // REAL USER: Load breach history from authenticated Neon PostgreSQL database
+      scansApi.list()
+        .then(({ scans }) => {
+          const pwdScans = (scans || []).filter(
+            (s: any) => s.raw_summary?.type === "password_breach_check" || s.rawSummary?.type === "password_breach_check"
+          );
+          const formatted: BreachHistoryItem[] = pwdScans.map((s: any) => {
+            const raw = s.raw_summary || s.rawSummary || {};
+            const cnt = Number(raw.foundCount ?? 0);
+            return {
+              id: s.id,
+              ts: raw.ts || (s.created_at ? new Date(s.created_at).getTime() : Date.now()),
+              length: Number(raw.length || 0),
+              foundCount: cnt,
+              label: raw.label || (cnt > 0 ? "Compromised" : "Not found"),
+            };
+          });
+          setBreachHistory(formatted.slice(0, 20));
+        })
+        .catch((err) => {
+          console.error("Failed to load password breach history from Neon:", err);
+        });
+    } else {
+      // DEMO USER: Load from local browser storage / memory (ZERO Neon reads)
+      try {
+        const raw =
+          localStorage.getItem(PASSWORD_HISTORY_KEY) ||
+          localStorage.getItem(LEGACY_PASSWORD_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            setBreachHistory(parsed);
+          }
         }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
-  }, []);
+  }, [user, isDemo]);
 
   const clearBreachHistory = () => {
-    try {
-      localStorage.removeItem(PASSWORD_HISTORY_KEY);
-      localStorage.removeItem(LEGACY_PASSWORD_KEY);
-    } catch {
-      // ignore
+    if (isDemo || !user) {
+      try {
+        localStorage.removeItem(PASSWORD_HISTORY_KEY);
+        localStorage.removeItem(LEGACY_PASSWORD_KEY);
+      } catch {
+        // ignore
+      }
     }
     setBreachHistory([]);
     toast.success("Password breach history cleared");
@@ -202,15 +235,45 @@ export default function PasswordLab() {
         foundCount: count,
         label,
       };
+
       setBreachHistory((prev) => {
         const updated = [newItem, ...prev].slice(0, 20);
-        try {
-          localStorage.setItem(PASSWORD_HISTORY_KEY, JSON.stringify(updated));
-        } catch {
-          // ignore
+        if (!user || isDemo) {
+          try {
+            localStorage.setItem(PASSWORD_HISTORY_KEY, JSON.stringify(updated));
+          } catch {
+            // ignore
+          }
         }
         return updated;
       });
+
+      if (user && !isDemo) {
+        // REAL USER: Persist breach audit check to Neon (ZERO plaintext secrets saved)
+        scansApi.create({
+          target: "password_audit",
+          targetType: "url_endpoint",
+          overallScore: count > 0 ? 0 : 100,
+          isVerified: true,
+          rawSummary: {
+            type: "password_breach_check",
+            length: breachPwd.length,
+            foundCount: count,
+            label,
+            ts: Date.now(),
+          },
+          findings: count > 0 ? [{
+            domainCategory: "CREDENTIAL_HYGIENE",
+            title: "Compromised Password Detected",
+            description: `Password of length ${breachPwd.length} was detected in ${count.toLocaleString()} known data breaches via k-anonymity verification.`,
+            severity: "critical",
+            verificationClass: "VERIFIED_EVIDENCE",
+            recommendation: "Do not use this password on any internal or external accounts. Enforce MFA and rotate credentials immediately.",
+          }] : [],
+        }).catch((err) => {
+          console.error("Failed to persist password breach check to Neon:", err);
+        });
+      }
 
       if (count > 0) toast.error(`Found in breaches: ${count.toLocaleString()} times`);
       else toast.success("Not found in known breach datasets");

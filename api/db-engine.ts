@@ -53,6 +53,11 @@ export interface UserRecord {
   display_name: string;
   password_hash: string;
   is_active: boolean;
+  token_version: number;
+  email_verified: boolean;
+  mfa_enabled: boolean;
+  mfa_secret: string | null;
+  mfa_backup_codes: string[];
   created_at: string;
   updated_at: string;
 }
@@ -73,8 +78,27 @@ export interface RefreshTokenRecord {
   token_hash: string;
   expires_at: string;
   is_revoked: boolean;
+  revocation_reason?: string | null;
   created_at: string;
   revoked_at: string | null;
+}
+
+export interface PasswordResetTokenRecord {
+  id: string;
+  user_id: string;
+  token_hash: string;
+  expires_at: string;
+  used_at: string | null;
+  created_at: string;
+}
+
+export interface EmailVerificationTokenRecord {
+  id: string;
+  user_id: string;
+  token_hash: string;
+  expires_at: string;
+  used_at: string | null;
+  created_at: string;
 }
 
 export interface AssetRecord {
@@ -240,6 +264,11 @@ CREATE TABLE IF NOT EXISTS users (
     display_name VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    token_version INT NOT NULL DEFAULT 1,
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    mfa_secret VARCHAR(512) NULL,
+    mfa_backup_codes TEXT[] DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -263,11 +292,34 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     token_hash VARCHAR(64) NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     is_revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    revocation_reason VARCHAR(64) NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     revoked_at TIMESTAMPTZ NULL
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_token_family ON refresh_tokens(family_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_token_hash ON refresh_tokens(token_hash);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_reset_token_hash ON password_reset_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_reset_token_user ON password_reset_tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_email_verify_hash ON email_verification_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_email_verify_user ON email_verification_tokens(user_id);
 
 CREATE TABLE IF NOT EXISTS assets (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -412,6 +464,13 @@ CREATE POLICY rls_audit_logs_isolation ON audit_logs
     USING (
         organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid
     );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 1;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret VARCHAR(512) NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_backup_codes TEXT[] DEFAULT '{}';
+ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS revocation_reason VARCHAR(64) NULL;
 `;
 
 export async function runMigrations(pool?: pg.Pool): Promise<void> {
@@ -495,6 +554,11 @@ function mapUser(row: any): UserRecord {
     display_name: row.display_name,
     password_hash: row.password_hash,
     is_active: Boolean(row.is_active),
+    token_version: Number(row.token_version ?? 1),
+    email_verified: Boolean(row.email_verified),
+    mfa_enabled: Boolean(row.mfa_enabled),
+    mfa_secret: row.mfa_secret ?? null,
+    mfa_backup_codes: Array.isArray(row.mfa_backup_codes) ? row.mfa_backup_codes : [],
     created_at: toIso(row.created_at),
     updated_at: toIso(row.updated_at),
   };
@@ -519,8 +583,31 @@ function mapRefreshToken(row: any): RefreshTokenRecord {
     token_hash: row.token_hash,
     expires_at: toIso(row.expires_at),
     is_revoked: Boolean(row.is_revoked),
+    revocation_reason: row.revocation_reason ?? null,
     created_at: toIso(row.created_at),
     revoked_at: toIsoOrNull(row.revoked_at),
+  };
+}
+
+function mapPasswordResetToken(row: any): PasswordResetTokenRecord {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    token_hash: row.token_hash,
+    expires_at: toIso(row.expires_at),
+    used_at: toIsoOrNull(row.used_at),
+    created_at: toIso(row.created_at),
+  };
+}
+
+function mapEmailVerificationToken(row: any): EmailVerificationTokenRecord {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    token_hash: row.token_hash,
+    expires_at: toIso(row.expires_at),
+    used_at: toIsoOrNull(row.used_at),
+    created_at: toIso(row.created_at),
   };
 }
 
@@ -599,6 +686,8 @@ class InMemoryEnterpriseDb {
   users = new Map<string, UserRecord>();
   workspaceMembers = new Map<string, WorkspaceMemberRecord>();
   refreshTokens = new Map<string, RefreshTokenRecord>();
+  passwordResetTokens = new Map<string, PasswordResetTokenRecord>();
+  emailVerificationTokens = new Map<string, EmailVerificationTokenRecord>();
   assets = new Map<string, AssetRecord>();
   scans = new Map<string, ScanRecord>();
   findings = new Map<string, FindingRecord>();
@@ -610,6 +699,8 @@ class InMemoryEnterpriseDb {
     this.users.clear();
     this.workspaceMembers.clear();
     this.refreshTokens.clear();
+    this.passwordResetTokens.clear();
+    this.emailVerificationTokens.clear();
     this.assets.clear();
     this.scans.clear();
     this.findings.clear();
@@ -704,7 +795,17 @@ export class EnterpriseDbClient {
   // USER / AUTH OPERATIONS
   // --------------------------------------------------------------------------
 
-  async createUser(data: Omit<UserRecord, 'id' | 'created_at' | 'updated_at'>): Promise<UserRecord> {
+  async createUser(data: {
+    email: string;
+    display_name: string;
+    password_hash: string;
+    is_active?: boolean;
+    token_version?: number;
+    email_verified?: boolean;
+    mfa_enabled?: boolean;
+    mfa_secret?: string | null;
+    mfa_backup_codes?: string[];
+  }): Promise<UserRecord> {
     const driver = getActiveDriver();
     if (driver === "postgres") {
       return this.withSystemTransaction(async (client) => {
@@ -717,8 +818,8 @@ export class EnterpriseDbClient {
         }
         const id = randomUUID();
         const res = await client.query(
-          `INSERT INTO users (id, email, display_name, password_hash, is_active, created_at, updated_at)
-           VALUES ($1, LOWER($2), $3, $4, $5, NOW(), NOW())
+          `INSERT INTO users (id, email, display_name, password_hash, is_active, token_version, email_verified, mfa_enabled, mfa_secret, mfa_backup_codes, created_at, updated_at)
+           VALUES ($1, LOWER($2), $3, $4, $5, 1, FALSE, FALSE, NULL, '{}', NOW(), NOW())
            RETURNING *`,
           [id, data.email, data.display_name, data.password_hash, data.is_active ?? true]
         );
@@ -741,6 +842,11 @@ export class EnterpriseDbClient {
       display_name: data.display_name,
       password_hash: data.password_hash,
       is_active: data.is_active ?? true,
+      token_version: 1,
+      email_verified: false,
+      mfa_enabled: false,
+      mfa_secret: null,
+      mfa_backup_codes: [],
       created_at: now,
       updated_at: now,
     };
@@ -781,6 +887,97 @@ export class EnterpriseDbClient {
     }
 
     return inMemoryDb.users.get(userId) || null;
+  }
+
+  async incrementUserTokenVersion(userId: string): Promise<number> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        const res = await client.query(
+          "UPDATE users SET token_version = token_version + 1, updated_at = NOW() WHERE id = $1 RETURNING token_version",
+          [userId]
+        );
+        return res.rows.length > 0 ? Number(res.rows[0].token_version) : 1;
+      });
+    }
+
+    const user = inMemoryDb.users.get(userId);
+    if (user) {
+      user.token_version = (user.token_version || 1) + 1;
+      user.updated_at = new Date().toISOString();
+      return user.token_version;
+    }
+    return 1;
+  }
+
+  async setUserEmailVerified(userId: string, verified = true): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        await client.query(
+          "UPDATE users SET email_verified = $1, updated_at = NOW() WHERE id = $2",
+          [verified, userId]
+        );
+      });
+    }
+
+    const user = inMemoryDb.users.get(userId);
+    if (user) {
+      user.email_verified = verified;
+      user.updated_at = new Date().toISOString();
+    }
+  }
+
+  async updateUserMfa(
+    userId: string,
+    mfa: { enabled: boolean; secret?: string | null; backupCodes?: string[] }
+  ): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        if (!mfa.enabled) {
+          await client.query(
+            `UPDATE users 
+             SET mfa_enabled = FALSE, 
+                 mfa_secret = NULL, 
+                 mfa_backup_codes = '{}', 
+                 updated_at = NOW() 
+             WHERE id = $1`,
+            [userId]
+          );
+        } else {
+          await client.query(
+            `UPDATE users 
+             SET mfa_enabled = TRUE, 
+                 mfa_secret = COALESCE($1, mfa_secret), 
+                 mfa_backup_codes = COALESCE($2, mfa_backup_codes), 
+                 updated_at = NOW() 
+             WHERE id = $3`,
+            [mfa.secret !== undefined ? mfa.secret : null, mfa.backupCodes !== undefined ? mfa.backupCodes : null, userId]
+          );
+        }
+      });
+    }
+
+    const user = inMemoryDb.users.get(userId);
+    if (user) {
+      user.mfa_enabled = mfa.enabled;
+      if (!mfa.enabled) {
+        user.mfa_secret = null;
+        user.mfa_backup_codes = [];
+      } else {
+        if (mfa.secret !== undefined) user.mfa_secret = mfa.secret;
+        if (mfa.backupCodes !== undefined) user.mfa_backup_codes = mfa.backupCodes;
+      }
+      user.updated_at = new Date().toISOString();
+    }
+  }
+
+  async findUserByIdWithMemberships(userId: string): Promise<{ user: UserRecord; memberships: WorkspaceMemberRecord[] } | null> {
+    const user = await this.findUserById(userId);
+    if (!user) return null;
+    const memberships = await this.getUserMemberships(userId);
+    return { user, memberships };
   }
 
   async updateUserPassword(userId: string, newPasswordHash: string): Promise<void> {
@@ -835,6 +1032,140 @@ export class EnterpriseDbClient {
     }
     for (const [id, t] of inMemoryDb.refreshTokens.entries()) {
       if (t.user_id === userId) inMemoryDb.refreshTokens.delete(id);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // PASSWORD RESET & EMAIL VERIFICATION TOKENS
+  // --------------------------------------------------------------------------
+
+  async savePasswordResetToken(userId: string, tokenHash: string, expiresAt: Date): Promise<PasswordResetTokenRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const id = randomUUID();
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, used_at, created_at)
+         VALUES ($1, $2, $3, $4, NULL, NOW())
+         RETURNING *`,
+        [id, userId, tokenHash, expiresAt.toISOString()]
+      );
+      return mapPasswordResetToken(res.rows[0]);
+    }
+
+    const id = randomUUID();
+    const record: PasswordResetTokenRecord = {
+      id,
+      user_id: userId,
+      token_hash: tokenHash,
+      expires_at: expiresAt.toISOString(),
+      used_at: null,
+      created_at: new Date().toISOString(),
+    };
+    inMemoryDb.passwordResetTokens.set(id, record);
+    return record;
+  }
+
+  async findPasswordResetToken(tokenHash: string): Promise<PasswordResetTokenRecord | null> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        "SELECT * FROM password_reset_tokens WHERE token_hash = $1 LIMIT 1",
+        [tokenHash]
+      );
+      if (res.rows.length === 0) return null;
+      return mapPasswordResetToken(res.rows[0]);
+    }
+
+    const found = Array.from(inMemoryDb.passwordResetTokens.values()).find(
+      t => t.token_hash === tokenHash
+    );
+    return found || null;
+  }
+
+  async markPasswordResetTokenUsed(tokenId: string): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      await pool.query(
+        "UPDATE password_reset_tokens SET used_at = NOW() WHERE id = $1",
+        [tokenId]
+      );
+      return;
+    }
+
+    const record = inMemoryDb.passwordResetTokens.get(tokenId);
+    if (record) {
+      record.used_at = new Date().toISOString();
+    }
+  }
+
+  async saveEmailVerificationToken(userId: string, tokenHash: string, expiresAt: Date): Promise<EmailVerificationTokenRecord> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const id = randomUUID();
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        `INSERT INTO email_verification_tokens (id, user_id, token_hash, expires_at, used_at, created_at)
+         VALUES ($1, $2, $3, $4, NULL, NOW())
+         RETURNING *`,
+        [id, userId, tokenHash, expiresAt.toISOString()]
+      );
+      return mapEmailVerificationToken(res.rows[0]);
+    }
+
+    const id = randomUUID();
+    const record: EmailVerificationTokenRecord = {
+      id,
+      user_id: userId,
+      token_hash: tokenHash,
+      expires_at: expiresAt.toISOString(),
+      used_at: null,
+      created_at: new Date().toISOString(),
+    };
+    inMemoryDb.emailVerificationTokens.set(id, record);
+    return record;
+  }
+
+  async findEmailVerificationToken(tokenHash: string): Promise<EmailVerificationTokenRecord | null> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        "SELECT * FROM email_verification_tokens WHERE token_hash = $1 LIMIT 1",
+        [tokenHash]
+      );
+      if (res.rows.length === 0) return null;
+      return mapEmailVerificationToken(res.rows[0]);
+    }
+
+    const found = Array.from(inMemoryDb.emailVerificationTokens.values()).find(
+      t => t.token_hash === tokenHash
+    );
+    return found || null;
+  }
+
+  async markEmailVerificationTokenUsed(tokenId: string): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      await pool.query(
+        "UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1",
+        [tokenId]
+      );
+      return;
+    }
+
+    const record = inMemoryDb.emailVerificationTokens.get(tokenId);
+    if (record) {
+      record.used_at = new Date().toISOString();
     }
   }
 
@@ -954,17 +1285,17 @@ export class EnterpriseDbClient {
   // REFRESH TOKEN ROTATION & TOKEN FAMILIES
   // --------------------------------------------------------------------------
 
-  async saveRefreshToken(userId: string, familyId: string, tokenHash: string, expiresAt: Date): Promise<RefreshTokenRecord> {
+  async saveRefreshToken(userId: string, familyId: string, tokenHash: string, expiresAt: Date, reason: string | null = null): Promise<RefreshTokenRecord> {
     const driver = getActiveDriver();
     if (driver === "postgres") {
       const id = randomUUID();
       const pool = getPool();
       await runMigrations(pool);
       const res = await pool.query(
-        `INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, expires_at, is_revoked, created_at, revoked_at)
-         VALUES ($1, $2, $3, $4, $5, FALSE, NOW(), NULL)
+        `INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, expires_at, is_revoked, revocation_reason, created_at, revoked_at)
+         VALUES ($1, $2, $3, $4, $5, FALSE, $6, NOW(), NULL)
          RETURNING *`,
-        [id, userId, familyId, tokenHash, expiresAt.toISOString()]
+        [id, userId, familyId, tokenHash, expiresAt.toISOString(), reason]
       );
       return mapRefreshToken(res.rows[0]);
     }
@@ -977,6 +1308,7 @@ export class EnterpriseDbClient {
       token_hash: tokenHash,
       expires_at: expiresAt.toISOString(),
       is_revoked: false,
+      revocation_reason: reason,
       created_at: new Date().toISOString(),
       revoked_at: null,
     };
@@ -1001,17 +1333,61 @@ export class EnterpriseDbClient {
     return found || null;
   }
 
-  async revokeTokenFamily(familyId: string): Promise<number> {
+  async findActiveRefreshTokenInFamily(familyId: string): Promise<RefreshTokenRecord | null> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        "SELECT * FROM refresh_tokens WHERE family_id = $1 AND is_revoked = FALSE AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+        [familyId]
+      );
+      if (res.rows.length === 0) return null;
+      return mapRefreshToken(res.rows[0]);
+    }
+
+    const found = Array.from(inMemoryDb.refreshTokens.values()).find(
+      t => t.family_id === familyId && !t.is_revoked && new Date(t.expires_at).getTime() > Date.now()
+    );
+    return found || null;
+  }
+
+  async findRecentConsumedToken(tokenHash: string, withinSeconds = 15): Promise<RefreshTokenRecord | null> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        `SELECT * FROM refresh_tokens 
+         WHERE token_hash = $1 
+           AND is_revoked = TRUE 
+           AND revoked_at >= NOW() - ($2 || ' seconds')::interval 
+         LIMIT 1`,
+        [tokenHash, withinSeconds]
+      );
+      if (res.rows.length === 0) return null;
+      return mapRefreshToken(res.rows[0]);
+    }
+
+    const found = Array.from(inMemoryDb.refreshTokens.values()).find(t => {
+      if (t.token_hash !== tokenHash || !t.is_revoked || !t.revoked_at) return false;
+      const ageMs = Date.now() - new Date(t.revoked_at).getTime();
+      return ageMs <= withinSeconds * 1000;
+    });
+    return found || null;
+  }
+
+  async revokeTokenFamily(familyId: string, reason = "REUSE_ATTACK_DETECTED"): Promise<number> {
     const driver = getActiveDriver();
     if (driver === "postgres") {
       const pool = getPool();
       await runMigrations(pool);
       const res = await pool.query(
         `UPDATE refresh_tokens 
-         SET is_revoked = TRUE, revoked_at = NOW() 
+         SET is_revoked = TRUE, revoked_at = NOW(), revocation_reason = $2 
          WHERE family_id = $1 AND is_revoked = FALSE
          RETURNING id`,
-        [familyId]
+        [familyId, reason]
       );
       return res.rowCount || 0;
     }
@@ -1022,20 +1398,21 @@ export class EnterpriseDbClient {
       if (record.family_id === familyId && !record.is_revoked) {
         record.is_revoked = true;
         record.revoked_at = now;
+        record.revocation_reason = reason;
         count++;
       }
     }
     return count;
   }
 
-  async consumeRefreshToken(recordId: string): Promise<void> {
+  async consumeRefreshToken(recordId: string, reason = "ROTATION"): Promise<void> {
     const driver = getActiveDriver();
     if (driver === "postgres") {
       const pool = getPool();
       await runMigrations(pool);
       await pool.query(
-        "UPDATE refresh_tokens SET is_revoked = TRUE, revoked_at = NOW() WHERE id = $1",
-        [recordId]
+        "UPDATE refresh_tokens SET is_revoked = TRUE, revoked_at = NOW(), revocation_reason = $2 WHERE id = $1",
+        [recordId, reason]
       );
       return;
     }
@@ -1044,7 +1421,36 @@ export class EnterpriseDbClient {
     if (record) {
       record.is_revoked = true;
       record.revoked_at = new Date().toISOString();
+      record.revocation_reason = reason;
     }
+  }
+
+  async revokeAllUserRefreshTokens(userId: string, reason = "LOGOUT_ALL"): Promise<number> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        `UPDATE refresh_tokens 
+         SET is_revoked = TRUE, revoked_at = NOW(), revocation_reason = $2 
+         WHERE user_id = $1 AND is_revoked = FALSE
+         RETURNING id`,
+        [userId, reason]
+      );
+      return res.rowCount || 0;
+    }
+
+    let count = 0;
+    const now = new Date().toISOString();
+    for (const record of inMemoryDb.refreshTokens.values()) {
+      if (record.user_id === userId && !record.is_revoked) {
+        record.is_revoked = true;
+        record.revoked_at = now;
+        record.revocation_reason = reason;
+        count++;
+      }
+    }
+    return count;
   }
 
   // --------------------------------------------------------------------------
@@ -1427,6 +1833,65 @@ export class EnterpriseDbClient {
       action,
       resource_type: resourceType,
       resource_id: resourceId,
+      details,
+      timestamp: new Date().toISOString(),
+    };
+    inMemoryDb.auditLogs.set(id, log);
+    return log;
+  }
+
+  async logSystemAuditEvent(data: {
+    organizationId?: string | null;
+    workspaceId?: string | null;
+    actorId?: string | null;
+    actorIp?: string;
+    action: string;
+    resourceType: string;
+    resourceId: string;
+    details?: Record<string, unknown>;
+  }): Promise<AuditLogRecord | null> {
+    const driver = getActiveDriver();
+    const actorIp = data.actorIp || "127.0.0.1";
+    const details = data.details || {};
+
+    if (driver === "postgres") {
+      if (!data.organizationId) {
+        return null;
+      }
+      return this.withSystemTransaction(async (client) => {
+        await client.query("SELECT set_config('app.current_org_id', $1, true)", [data.organizationId]);
+        const id = randomUUID();
+        const res = await client.query(
+          `INSERT INTO audit_logs (id, organization_id, workspace_id, actor_id, actor_ip, action, resource_type, resource_id, details, timestamp)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+           RETURNING *`,
+          [
+            id,
+            data.organizationId,
+            data.workspaceId || null,
+            data.actorId || null,
+            actorIp,
+            data.action,
+            data.resourceType,
+            data.resourceId,
+            JSON.stringify(details),
+          ]
+        );
+        return mapAuditLog(res.rows[0]);
+      });
+    }
+
+    if (!data.organizationId) return null;
+    const id = randomUUID();
+    const log: AuditLogRecord = {
+      id,
+      organization_id: data.organizationId,
+      workspace_id: data.workspaceId || "",
+      actor_id: data.actorId || null,
+      actor_ip: actorIp,
+      action: data.action,
+      resource_type: data.resourceType,
+      resource_id: data.resourceId,
       details,
       timestamp: new Date().toISOString(),
     };

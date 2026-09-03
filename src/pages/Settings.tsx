@@ -79,11 +79,12 @@ export default function Settings() {
 
       const result = await migrationApi.importLegacy(payload);
 
-      // Clean up legacy localStorage keys
+      // Clean up legacy localStorage keys only after successful migration response
       localStorage.removeItem("pasco_scan_history_v1");
       localStorage.removeItem("pasco_scanner_history_v2");
       localStorage.removeItem("pasco_websec_history_v1");
       localStorage.removeItem("pasco_email_history_v1");
+      window.dispatchEvent(new Event("storage"));
 
       setMigrationStatus(
         `Imported ${result.metrics.importedAssets} assets, ${result.metrics.importedScans} scans, and ${result.metrics.importedFindings} findings into PostgreSQL.`

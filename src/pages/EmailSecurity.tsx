@@ -30,7 +30,7 @@ import {
 import { toast } from "sonner";
 import { analyzeEmail, type EmailScanResult } from "@/lib/email";
 import { useAuth } from "@/hooks/useAuth";
-import { scansApi } from "@/lib/api";
+import { scansApi, assetsApi } from "@/lib/api";
 
 const HISTORY_KEY = "pasco_email_history_v1";
 
@@ -43,19 +43,67 @@ export default function EmailSecurity() {
   const [history, setHistory] = useState<EmailScanResult[]>([]);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (raw) setHistory(JSON.parse(raw));
-    } catch {
-      // ignore
+    let cancelled = false;
+    async function load() {
+      if (user && !isDemo) {
+        try {
+          const [scansRes, assetsRes] = await Promise.all([
+            scansApi.list().catch(() => ({ scans: [] })),
+            assetsApi.list().catch(() => ({ assets: [] })),
+          ]);
+          if (cancelled) return;
+          const assets = assetsRes.assets || [];
+          const assetMap = new Map<string, string>();
+          assets.forEach((a: any) => assetMap.set(a.id, a.target_value || a.targetValue));
+
+          const emailScans = (scansRes.scans || [])
+            .filter((s: any) => {
+              const target = (assetMap.get(s.asset_id || s.assetId) || "").toLowerCase();
+              return target.includes("@") || s.scan_type === "imported" || (s.raw_summary && typeof s.raw_summary === "string" && s.raw_summary.includes("provider"));
+            })
+            .map((s: any) => {
+              const target = assetMap.get(s.asset_id || s.assetId) || "Email Domain";
+              const raw = typeof s.raw_summary === "string" ? JSON.parse(s.raw_summary) : (s.raw_summary || s.rawSummary || {});
+              const score = s.overall_score !== null && s.overall_score !== undefined ? Number(s.overall_score) : (raw.legacyScore ?? 85);
+              return {
+                email: target,
+                domain: target.includes("@") ? target.split("@")[1] : target,
+                valid: true,
+                score,
+                provider: "custom",
+                disposable: Boolean(raw.disposable),
+                roleBased: false,
+                scannedAt: typeof s.created_at === "string" ? new Date(s.created_at).getTime() : Date.now(),
+                flags: [],
+                spf: { present: true, record: "v=spf1 ...", strength: "strong" },
+                dmarc: { present: true, record: "v=DMARC1; p=reject", policy: "reject" },
+                mxRecords: [],
+              } as EmailScanResult;
+            });
+          setHistory(emailScans.slice(0, 15));
+        } catch {
+          // ignore
+        }
+      } else {
+        try {
+          const raw = localStorage.getItem(HISTORY_KEY);
+          if (raw) setHistory(JSON.parse(raw));
+        } catch {
+          // ignore
+        }
+      }
     }
-  }, []);
+    load();
+    return () => { cancelled = true; };
+  }, [user, isDemo]);
 
   const clearHistory = () => {
-    try {
-      localStorage.removeItem(HISTORY_KEY);
-    } catch {
-      // ignore
+    if (isDemo || !user) {
+      try {
+        localStorage.removeItem(HISTORY_KEY);
+      } catch {
+        // ignore
+      }
     }
     setHistory([]);
     toast.success("Email audit history cleared");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { EnterpriseDbClient, inMemoryDb } from "../api/db-engine.ts";
+import { EnterpriseDbClient, inMemoryDb, closePool } from "../api/db-engine.ts";
 import {
   hashPassword,
   verifyPassword,
@@ -466,4 +466,269 @@ test("PASCOAI ENTERPRISE OS — STAGE 8.1 SECURITY & RLS AUDIT SUITE", async (t)
     const invalid = await verifyPassword("WrongPassword123", hashed);
     assert.equal(invalid, false, "Wrong password fails verification");
   });
+
+  // --------------------------------------------------------------------------
+  // TEST 13: Milestone 3C - Mixed legacy payload format ingestion & audit trail
+  // --------------------------------------------------------------------------
+  await t.test("13. Mixed legacy payload format ingestion, idempotency & audit trail", async () => {
+    const complexPayload = {
+      scannerHistory: [
+        {
+          target: "legacy-mixed.corp",
+          score: 80,
+          date: "2026-08-01T10:00:00Z",
+          findings: [
+            { title: "Direct Finding 1", severity: "medium", description: "Direct format finding" },
+          ],
+        },
+      ],
+      websecHistory: [
+        {
+          url: "https://legacy-mixed.corp",
+          score: 75,
+          grade: "B",
+          issues: [
+            "Missing Strict-Transport-Security Header",
+            "Missing Content-Security-Policy",
+          ],
+        },
+      ],
+      emailHistory: [
+        {
+          email: "security@legacy-mixed.corp",
+          score: 60,
+          status: "warning",
+          flags: [
+            { level: "high", title: "DMARC Policy None", message: "p=none does not reject spoofing" },
+            { level: "warning", title: "SPF Softfail", message: "~all configured" },
+          ],
+        },
+      ],
+      customTargets: ["custom-legacy-target.io"],
+    };
+
+    const res = mockResponse();
+    await migrationHandler(
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenAdminA}` },
+        body: complexPayload,
+      },
+      res.value
+    );
+
+    assert.equal(res.state.statusCode, 200);
+    const body = JSON.parse(res.state.body);
+    assert.equal(body.status, "complete");
+    assert.equal(body.verificationClass, "IMPORTED_UNVERIFIED");
+    assert.ok(body.metrics.importedAssets >= 2);
+    assert.ok(body.metrics.importedFindings >= 5);
+    assert.equal(body.metrics.verifiedScoreContribution, 0);
+
+    // Verify audit log event
+    const auditLogs = await clientA.getAuditLogs();
+    const migrationLog = auditLogs.find((l) => l.action === "migration.imported_local_data");
+    assert.ok(migrationLog !== undefined, "Audit log record created for migration");
+    assert.equal(migrationLog.resource_type, "workspace");
+  });
+
+  // --------------------------------------------------------------------------
+  // TEST 14: Milestone 3D - CryptoLab Persistent Record Creation & RLS Isolation
+  // --------------------------------------------------------------------------
+  await t.test("14. CryptoLab persistent operations logging with strict RLS isolation", async () => {
+    const res = mockResponse();
+    await scansHandler(
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenAdminA}` },
+        body: {
+          target: "cryptolab",
+          targetType: "url_endpoint",
+          isVerified: true,
+          overallScore: null,
+          rawSummary: {
+            type: "crypto_operation",
+            action: "encrypt",
+            kind: "file",
+            fingerprint: "a1b2c3d4e5f6",
+            filename: "secret-financials.pdf",
+            size: 10240,
+            note: "Q3 Board Briefing",
+            ok: true,
+            ts: Date.now(),
+          },
+        },
+      },
+      res.value
+    );
+
+    assert.equal(res.state.statusCode, 201, "Crypto operation saved successfully");
+    const body = JSON.parse(res.state.body);
+    assert.ok(body.scan.id);
+    assert.equal(body.scan.workspace_id, wsA1.id);
+    assert.equal(body.scan.raw_summary.type, "crypto_operation");
+    assert.equal(body.scan.raw_summary.fingerprint, "a1b2c3d4e5f6");
+    assert.equal(body.scan.raw_summary.password, undefined, "Plaintext password must NEVER be persisted");
+
+    // Verify Org B cannot see Org A's crypto scan
+    const listResB = mockResponse();
+    await scansHandler(
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${tokenAdminB}` },
+      },
+      listResB.value
+    );
+    const bodyB = JSON.parse(listResB.state.body);
+    const hasOrgACrypto = bodyB.scans.some((s) => s.raw_summary?.fingerprint === "a1b2c3d4e5f6");
+    assert.equal(hasOrgACrypto, false, "Cross-tenant RLS isolation prevents Org B from seeing Org A crypto records");
+  });
+
+  // --------------------------------------------------------------------------
+  // TEST 15: Milestone 3D - PasswordLab Breach Check Persistence & Zero-Plaintext
+  // --------------------------------------------------------------------------
+  await t.test("15. PasswordLab breach telemetry persistence and zero-plaintext guarantees", async () => {
+    const res = mockResponse();
+    await scansHandler(
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenAdminA}` },
+        body: {
+          target: "password_audit",
+          targetType: "url_endpoint",
+          overallScore: 0,
+          isVerified: true,
+          rawSummary: {
+            type: "password_breach_check",
+            length: 12,
+            foundCount: 384000,
+            label: "Compromised",
+            ts: Date.now(),
+          },
+          findings: [
+            {
+              domainCategory: "CREDENTIAL_HYGIENE",
+              title: "Compromised Password Detected",
+              description: "Password of length 12 was detected in 384,000 breaches via k-anonymity.",
+              severity: "critical",
+              verificationClass: "VERIFIED_EVIDENCE",
+              recommendation: "Rotate credential and enforce MFA.",
+            },
+          ],
+        },
+      },
+      res.value
+    );
+
+    assert.equal(res.state.statusCode, 201);
+    const body = JSON.parse(res.state.body);
+    assert.ok(body.scan.id);
+    assert.equal(body.scan.workspace_id, wsA1.id);
+    assert.equal(body.scan.raw_summary.type, "password_breach_check");
+    assert.equal(body.scan.raw_summary.password, undefined, "Plaintext password must NEVER exist in DB");
+    assert.equal(body.findings.length, 1);
+    assert.equal(body.findings[0].verification_class, "VERIFIED_EVIDENCE");
+    assert.equal(body.findings[0].severity, "critical");
+  });
+
+  // --------------------------------------------------------------------------
+  // TEST 16: Milestone 3D - AI Research & Simulation History Persistence
+  // --------------------------------------------------------------------------
+  await t.test("16. AI Research & Interactive Simulations persistence with strict verification classes", async () => {
+    // 1. Research log
+    const resResearch = mockResponse();
+    await scansHandler(
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenAdminA}` },
+        body: {
+          target: "ai_research",
+          targetType: "url_endpoint",
+          isVerified: true,
+          overallScore: null,
+          rawSummary: {
+            type: "ai_research",
+            topic: "Post-Quantum Cryptography Migration",
+            persona: "ciso",
+            deepMode: true,
+            date: "2026-09-01",
+            summary: "Analysis of NIST PQC standards and migration strategies.",
+            risks: ["Legacy RSA-2048 vulnerable to future Shor's algorithm."],
+            nextSteps: ["Audit internal cryptographic cipher suites."],
+          },
+          findings: [
+            {
+              domainCategory: "THREAT_INTELLIGENCE",
+              title: "Quantum Decryption Risk for RSA-2048",
+              description: "Legacy RSA-2048 vulnerable to future Shor's algorithm.",
+              severity: "info",
+              verificationClass: "AI_THREAT_ANALYSIS",
+              recommendation: "Audit internal cryptographic cipher suites.",
+            },
+          ],
+        },
+      },
+      resResearch.value
+    );
+    assert.equal(resResearch.state.statusCode, 201);
+    const bodyResearch = JSON.parse(resResearch.state.body);
+    assert.equal(bodyResearch.scan.raw_summary.type, "ai_research");
+    assert.equal(bodyResearch.findings[0].verification_class, "AI_THREAT_ANALYSIS");
+
+    // 2. Simulation log
+    const resSim = mockResponse();
+    await scansHandler(
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenAdminA}` },
+        body: {
+          target: "security_simulations",
+          targetType: "url_endpoint",
+          isVerified: true,
+          overallScore: null,
+          rawSummary: {
+            type: "security_simulation",
+            toolId: "pass-spraying",
+            categoryId: "password",
+            title: "Password Spraying Defense",
+            date: "2026-09-01",
+            risk: "HIGH",
+            impact: "Account Lockout & Compromise",
+          },
+          findings: [
+            {
+              domainCategory: "DEFENSE_SIMULATION",
+              title: "Simulation: Password Spraying Defense",
+              description: "Interactive defense simulation completed: Password Spraying Attack",
+              severity: "medium",
+              verificationClass: "TRAINING_SIMULATION",
+              recommendation: "Implement adaptive rate limiting and anomalous IP throttling.",
+            },
+          ],
+        },
+      },
+      resSim.value
+    );
+    assert.equal(resSim.state.statusCode, 201);
+    const bodySim = JSON.parse(resSim.state.body);
+    assert.equal(bodySim.scan.raw_summary.type, "security_simulation");
+    assert.equal(bodySim.findings[0].verification_class, "TRAINING_SIMULATION");
+
+    // 3. Verify real-user retrieval via GET /api/scans
+    const listResA = mockResponse();
+    await scansHandler(
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${tokenAdminA}` },
+      },
+      listResA.value
+    );
+    const bodyA = JSON.parse(listResA.state.body);
+    assert.ok(bodyA.scans.some((s) => s.raw_summary?.type === "crypto_operation"));
+    assert.ok(bodyA.scans.some((s) => s.raw_summary?.type === "password_breach_check"));
+    assert.ok(bodyA.scans.some((s) => s.raw_summary?.type === "ai_research"));
+    assert.ok(bodyA.scans.some((s) => s.raw_summary?.type === "security_simulation"));
+  });
+
+  await closePool();
 });

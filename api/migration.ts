@@ -120,7 +120,7 @@ export default async function migrationHandler(
         });
         importedScansCount++;
 
-        // Process findings
+        // Process findings from results categories
         if (Array.isArray(item.results)) {
           for (const cat of item.results) {
             if (Array.isArray(cat.findings)) {
@@ -138,6 +138,19 @@ export default async function migrationHandler(
               }
             }
           }
+        } else if (Array.isArray((item as any).findings)) {
+          for (const f of (item as any).findings) {
+            await tenantDb.createFinding({
+              scanId: scan.id,
+              domainCategory: f.domainCategory || f.category || 'Recon',
+              title: f.title || 'Legacy Finding',
+              description: f.description || 'Imported finding from local storage',
+              severity: (f.severity as any) || 'low',
+              verificationClass: 'IMPORTED_UNVERIFIED',
+              recommendation: f.recommendation || 'Re-run verified probe to substantiate finding.',
+            });
+            importedFindingsCount++;
+          }
         }
       }
     }
@@ -145,8 +158,9 @@ export default async function migrationHandler(
     // 2. Process WebSec History
     if (Array.isArray(payload.websecHistory)) {
       for (const item of payload.websecHistory) {
-        if (!item.url) continue;
-        const assetId = await getOrCreateAsset(item.url, 'url_endpoint');
+        const targetUrl = item.url || (item as any).finalUrl;
+        if (!targetUrl) continue;
+        const assetId = await getOrCreateAsset(targetUrl, 'url_endpoint');
 
         const scan = await tenantDb.createScan({
           assetId,
@@ -159,14 +173,24 @@ export default async function migrationHandler(
 
         if (Array.isArray(item.issues)) {
           for (const issue of item.issues) {
+            const isString = typeof issue === "string";
+            const issueStr = typeof issue === "string" ? issue : "";
+            const issueObj = typeof issue === "object" && issue !== null ? (issue as any) : {};
+            const title = isString ? issueStr : issueObj.title || issueObj.name || 'Legacy Web Security Issue';
+            const description = isString ? `Imported web issue: ${issueStr}` : issueObj.description || issueObj.title || 'Imported web security finding';
+            const severity = isString
+              ? (issueStr.toLowerCase().includes("certificate") || issueStr.toLowerCase().includes("https") || issueStr.toLowerCase().includes("ssl") ? "high" : "medium")
+              : (issueObj.severity as any) || 'medium';
+            const recommendation = isString ? "Apply recommended TLS and HTTP security header hardening." : issueObj.recommendation || 'Perform automated header probe to verify.';
+
             await tenantDb.createFinding({
               scanId: scan.id,
               domainCategory: 'AUDIT_DEFENSE',
-              title: issue.title || 'Legacy Web Security Issue',
-              description: issue.description || 'Imported web security finding',
-              severity: (issue.severity as any) || 'medium',
+              title,
+              description,
+              severity,
               verificationClass: 'IMPORTED_UNVERIFIED',
-              recommendation: issue.recommendation || 'Perform automated header probe to verify.',
+              recommendation,
             });
             importedFindingsCount++;
           }
@@ -177,28 +201,37 @@ export default async function migrationHandler(
     // 3. Process Email Security History
     if (Array.isArray(payload.emailHistory)) {
       for (const item of payload.emailHistory) {
-        if (!item.email) continue;
-        const assetId = await getOrCreateAsset(item.email, 'email_domain');
+        const targetEmail = item.email || (item as any).domain;
+        if (!targetEmail) continue;
+        const assetId = await getOrCreateAsset(targetEmail, 'email_domain');
 
         const scan = await tenantDb.createScan({
           assetId,
           scanType: 'imported',
           isVerified: false,
           overallScore: null,
-          rawSummary: { legacyStatus: item.status },
+          rawSummary: { legacyStatus: item.status, legacyScore: item.score },
         });
         importedScansCount++;
 
         if (Array.isArray(item.flags)) {
           for (const flag of item.flags) {
+            const isString = typeof flag === "string";
+            const title = isString ? flag : (flag as any).title || flag.name || (flag as any).message || 'Legacy Email Config Flag';
+            const description = isString ? flag : flag.description || (flag as any).message || (flag as any).title || 'Imported email posture observation';
+            const severity = isString
+              ? 'low'
+              : ((flag as any).level === "critical" ? "critical" : (flag as any).level === "high" ? "high" : (flag as any).level === "warning" ? "medium" : "low");
+            const recommendation = isString ? 'Query authoritative DNS MX/SPF/DMARC records for live status.' : (flag as any).recommendation || 'Query authoritative DNS MX/SPF/DMARC records for live status.';
+
             await tenantDb.createFinding({
               scanId: scan.id,
               domainCategory: 'EMAIL_SECURITY',
-              title: flag.name || 'Legacy Email Config Flag',
-              description: flag.description || 'Imported email posture observation',
-              severity: 'low',
+              title,
+              description,
+              severity,
               verificationClass: 'IMPORTED_UNVERIFIED',
-              recommendation: 'Query authoritative DNS MX/SPF/DMARC records for live status.',
+              recommendation,
             });
             importedFindingsCount++;
           }

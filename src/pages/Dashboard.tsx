@@ -86,37 +86,112 @@ export default function Dashboard() {
         const assetMap = new Map<string, string>();
         assets.forEach((a: any) => assetMap.set(a.id, a.target_value || a.targetValue));
 
-        const formattedScans: Record<string, unknown>[] = (scans || []).map((s: any) => {
+        const scannerList: Record<string, unknown>[] = [];
+        const websecList: Record<string, unknown>[] = [];
+        const emailList: Record<string, unknown>[] = [];
+        const cryptoList: Record<string, unknown>[] = [];
+        const passwordList: Record<string, unknown>[] = [];
+        const researchList: Record<string, unknown>[] = [];
+        const simList: Record<string, unknown>[] = [];
+
+        (scans || []).forEach((s: any) => {
           const target = assetMap.get(s.asset_id || s.assetId) || "Host";
           const scanFindings = (findings || []).filter((f: any) => (f.scan_id || f.scanId) === s.id);
-          return {
-            id: s.id,
-            target,
-            score: s.overall_score !== null && s.overall_score !== undefined ? Number(s.overall_score) : null,
-            scannedAt: s.created_at || s.createdAt,
-            date: s.created_at || s.createdAt,
-            results: [
-              {
-                category: "Host Reconnaissance",
-                findings: scanFindings.map((f: any) => ({
-                  title: f.title,
-                  description: f.description,
-                  severity: f.severity,
-                  recommendation: f.recommendation,
-                  verificationClass: f.verification_class,
-                })),
-              },
-            ],
-          };
+          const raw = s.raw_summary || s.rawSummary || {};
+          const scanType = raw.type || "";
+
+          if (scanType === "crypto_operation") {
+            cryptoList.push({
+              id: s.id,
+              ts: raw.ts || (s.created_at ? new Date(s.created_at).getTime() : Date.now()),
+              action: raw.action || "encrypt",
+              kind: raw.kind || "text",
+              fingerprint: raw.fingerprint || "n/a",
+              filename: raw.filename,
+              size: raw.size,
+              note: raw.note,
+              ok: raw.ok !== false,
+            });
+          } else if (scanType === "password_breach_check") {
+            passwordList.push({
+              id: s.id,
+              ts: raw.ts || (s.created_at ? new Date(s.created_at).getTime() : Date.now()),
+              length: Number(raw.length || 0),
+              foundCount: Number(raw.foundCount || 0),
+              label: raw.label || (Number(raw.foundCount || 0) > 0 ? "Compromised" : "Not found"),
+            });
+          } else if (scanType === "ai_research") {
+            researchList.push({
+              topic: raw.topic || target || "Security Research",
+              persona: raw.persona || "soc_analyst",
+              deepMode: Boolean(raw.deepMode),
+              date: raw.date || (s.created_at ? s.created_at.slice(0, 10) : new Date().toISOString().slice(0, 10)),
+            });
+          } else if (scanType === "security_simulation") {
+            simList.push({
+              toolId: raw.toolId || "unknown",
+              categoryId: raw.categoryId || "general",
+              title: raw.title || "Security Simulation",
+              date: raw.date || (s.created_at ? s.created_at.slice(0, 10) : new Date().toISOString().slice(0, 10)),
+            });
+          } else if (scanType === "websec" || target.startsWith("http://") || target.startsWith("https://")) {
+            websecList.push({
+              id: s.id,
+              url: target,
+              score: s.overall_score !== null && s.overall_score !== undefined ? Number(s.overall_score) : 100,
+              grade: raw.grade || "A",
+              https: raw.https ?? true,
+              issues: scanFindings.map((f: any) => ({
+                title: f.title,
+                description: f.description,
+                severity: f.severity,
+                recommendation: f.recommendation,
+                verificationClass: f.verification_class,
+              })),
+              recommendations: scanFindings.map((f: any) => f.recommendation).filter(Boolean),
+              scannedAt: s.created_at || s.createdAt,
+            });
+          } else if (scanType === "email_security" || target.includes("@")) {
+            emailList.push({
+              id: s.id,
+              email: target,
+              domain: raw.domain || target,
+              score: s.overall_score !== null && s.overall_score !== undefined ? Number(s.overall_score) : 100,
+              provider: raw.provider || "MX",
+              spf: raw.spf || "pass",
+              dmarc: raw.dmarc || "pass",
+              scannedAt: s.created_at || s.createdAt,
+            });
+          } else {
+            scannerList.push({
+              id: s.id,
+              target,
+              score: s.overall_score !== null && s.overall_score !== undefined ? Number(s.overall_score) : null,
+              scannedAt: s.created_at || s.createdAt,
+              date: s.created_at || s.createdAt,
+              results: [
+                {
+                  category: "Host Reconnaissance",
+                  findings: scanFindings.map((f: any) => ({
+                    title: f.title,
+                    description: f.description,
+                    severity: f.severity,
+                    recommendation: f.recommendation,
+                    verificationClass: f.verification_class,
+                  })),
+                },
+              ],
+            });
+          }
         });
 
-        setScanHistory(formattedScans);
-        setWebsecHistory([]);
-        setEmailHistory([]);
-        setCryptoHistory([]);
-        setPasswordHistory([]);
-        setResearchHistory([]);
-        setSimHistory([]);
+        setScanHistory(scannerList);
+        setWebsecHistory(websecList);
+        setEmailHistory(emailList);
+        setCryptoHistory(cryptoList);
+        setPasswordHistory(passwordList);
+        setResearchHistory(researchList);
+        setSimHistory(simList);
       } catch (err) {
         console.error("Failed to load real user telemetry from Neon:", err);
       } finally {

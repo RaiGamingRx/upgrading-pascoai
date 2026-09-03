@@ -11,6 +11,8 @@ import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { AnimatedPageHeading } from "@/components/motion/AnimatedPageHeading";
+import { useAuth } from "@/hooks/useAuth";
+import { scansApi } from "@/lib/api";
 import {
   Lock,
   Unlock,
@@ -152,33 +154,93 @@ export default function CryptoLab() {
   /* ---------------- Paste UX ---------------- */
   const [pasted, setPasted] = useState(false);
 
+  /* ---------------- Auth & Tenant Context ---------------- */
+  const { user, isDemo } = useAuth();
+
   /* ---------------- History ---------------- */
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (raw) setHistory(JSON.parse(raw));
-    } catch {
-      // ignore
+    if (user && !isDemo) {
+      // REAL USER: Fetch from authenticated Neon database
+      scansApi.list()
+        .then(({ scans }) => {
+          const cryptoScans = (scans || []).filter(
+            (s: any) => s.raw_summary?.type === "crypto_operation" || s.rawSummary?.type === "crypto_operation"
+          );
+          const formatted: HistoryItem[] = cryptoScans.map((s: any) => {
+            const raw = s.raw_summary || s.rawSummary || {};
+            return {
+              id: s.id,
+              ts: raw.ts || (s.created_at ? new Date(s.created_at).getTime() : Date.now()),
+              action: raw.action || "encrypt",
+              kind: raw.kind || "text",
+              fingerprint: raw.fingerprint || "n/a",
+              filename: raw.filename,
+              size: raw.size,
+              note: raw.note,
+              ok: raw.ok !== false,
+            };
+          });
+          setHistory(formatted.slice(0, 20));
+        })
+        .catch((err) => {
+          console.error("Failed to load crypto history from Neon:", err);
+        });
+    } else {
+      // DEMO USER: Load from local browser storage / memory (ZERO Neon reads)
+      try {
+        const raw = localStorage.getItem(HISTORY_KEY);
+        if (raw) setHistory(JSON.parse(raw));
+      } catch {
+        // ignore
+      }
     }
-  }, []);
+  }, [user, isDemo]);
 
   const pushHistory = (item: HistoryItem) => {
     const updated = [item, ...history].slice(0, 20);
     setHistory(updated);
-    try {
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-    } catch {
-      // ignore
+
+    if (user && !isDemo) {
+      // REAL USER: Persist to Neon PostgreSQL via authenticated RLS API
+      scansApi.create({
+        target: "cryptolab",
+        targetType: "url_endpoint",
+        isVerified: true,
+        overallScore: null,
+        rawSummary: {
+          type: "crypto_operation",
+          action: item.action,
+          kind: item.kind,
+          fingerprint: item.fingerprint,
+          filename: item.filename,
+          size: item.size,
+          note: item.note,
+          ok: item.ok,
+          ts: item.ts,
+        },
+      }).catch((err) => {
+        console.error("Failed to persist crypto operation to Neon:", err);
+      });
+    } else {
+      // DEMO USER: Store in local browser storage only (ZERO Neon writes)
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
     }
   };
 
   const clearHistory = () => {
     if (!history.length) return;
-    try {
-      localStorage.removeItem(HISTORY_KEY);
-    } catch {
-      // ignore
+    if (isDemo || !user) {
+      try {
+        localStorage.removeItem(HISTORY_KEY);
+      } catch {
+        // ignore
+      }
     }
     setHistory([]);
     toast.success("Crypto history cleared");

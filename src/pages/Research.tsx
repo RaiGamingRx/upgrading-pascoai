@@ -33,6 +33,8 @@ import { toast } from "sonner";
 
 import { runAI, type AIInlineFile } from "@/lib/aiClient";
 import { personas } from "@/ai/personas";
+import { useAuth } from "@/hooks/useAuth";
+import { scansApi } from "@/lib/api";
 
 /* ---------- TYPES ---------- */
 type PersonaId = (typeof personas)[number]["id"];
@@ -267,6 +269,7 @@ async function fileToBase64NoPrefix(file: File): Promise<string> {
 
 /* ---------- COMPONENT ---------- */
 export default function Research() {
+  const { user, isDemo } = useAuth();
   const [query, setQuery] = useState("");
   const [persona, setPersona] = useState<PersonaId>(personas[0].id);
   const [deepMode, setDeepMode] = useState(false);
@@ -277,9 +280,33 @@ export default function Research() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    const saved = safeJsonParse<HistoryItem[]>(localStorage.getItem(HISTORY_KEY), []);
-    setHistory(Array.isArray(saved) ? saved.slice(0, MAX_HISTORY) : []);
-  }, []);
+    if (user && !isDemo) {
+      // REAL USER: Query research history from authenticated Neon PostgreSQL database
+      scansApi.list()
+        .then(({ scans }) => {
+          const researchScans = (scans || []).filter(
+            (s: any) => s.raw_summary?.type === "ai_research" || s.rawSummary?.type === "ai_research"
+          );
+          const formatted: HistoryItem[] = researchScans.map((s: any) => {
+            const raw = s.raw_summary || s.rawSummary || {};
+            return {
+              topic: raw.topic || "Security Research",
+              persona: raw.persona || "soc_analyst",
+              deepMode: Boolean(raw.deepMode),
+              date: raw.date || (s.created_at ? s.created_at.slice(0, 10) : todayISO()),
+            };
+          });
+          setHistory(formatted.slice(0, MAX_HISTORY));
+        })
+        .catch((err) => {
+          console.error("Failed to load research history from Neon:", err);
+        });
+    } else {
+      // DEMO USER: Load from local browser storage / memory (ZERO Neon reads)
+      const saved = safeJsonParse<HistoryItem[]>(localStorage.getItem(HISTORY_KEY), []);
+      setHistory(Array.isArray(saved) ? saved.slice(0, MAX_HISTORY) : []);
+    }
+  }, [user, isDemo]);
 
   const personaLabelById = useMemo(() => {
     const m = new Map<PersonaId, string>();
@@ -287,7 +314,7 @@ export default function Research() {
     return m;
   }, []);
 
-  const saveHistory = (topic: string, pid: PersonaId, dm: boolean) => {
+  const saveHistory = (topic: string, pid: PersonaId, dm: boolean, fullResult?: ResearchResult | null) => {
     const item: HistoryItem = {
       topic: topic.trim(),
       persona: pid,
@@ -302,12 +329,55 @@ export default function Research() {
 
     const updated = [item, ...filtered].slice(0, MAX_HISTORY);
     setHistory(updated);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+
+    if (user && !isDemo) {
+      // REAL USER: Persist research analysis to Neon via authenticated RLS endpoint
+      scansApi.create({
+        target: "ai_research",
+        targetType: "url_endpoint",
+        isVerified: true,
+        overallScore: null,
+        rawSummary: {
+          type: "ai_research",
+          topic: topic.trim(),
+          persona: pid,
+          deepMode: dm,
+          date: todayISO(),
+          summary: fullResult?.summary,
+          keyFindings: fullResult?.keyFindings,
+          risks: fullResult?.risks,
+          nextSteps: fullResult?.nextSteps,
+        },
+        findings: (fullResult?.risks || []).slice(0, 3).map((r: string, idx: number) => ({
+          domainCategory: "THREAT_INTELLIGENCE",
+          title: `Research Finding: ${r.slice(0, 80)}`,
+          description: r,
+          severity: "info",
+          verificationClass: "AI_THREAT_ANALYSIS",
+          recommendation: fullResult?.nextSteps?.[idx] || "Review AI security advisory recommendations.",
+        })),
+      }).catch((err) => {
+        console.error("Failed to persist research log to Neon:", err);
+      });
+    } else {
+      // DEMO USER: Save to local browser storage only (ZERO Neon writes)
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+    }
   };
 
   const clearHistory = () => {
+    if (isDemo || !user) {
+      try {
+        localStorage.removeItem(HISTORY_KEY);
+      } catch {
+        // ignore
+      }
+    }
     setHistory([]);
-    localStorage.removeItem(HISTORY_KEY);
     toast.success("History cleared");
   };
 
@@ -380,7 +450,7 @@ export default function Research() {
       };
 
       setResult(withMeta);
-      saveHistory(query.trim(), persona, deepMode);
+      saveHistory(query.trim(), persona, deepMode, withMeta);
 
       toast.success("Analysis complete");
     } catch (e: any) {

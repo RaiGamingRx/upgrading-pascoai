@@ -96,6 +96,19 @@ export async function authenticateAndAuthorize(
     throw new Error("UNAUTHORIZED: Invalid or expired access token");
   }
 
+  // Look up verified user record to enforce account activity and session revocation
+  const user = await db.findUserById(payload.sub);
+  if (!user || user.is_active === false) {
+    throw new Error("UNAUTHORIZED: User account is inactive or does not exist");
+  }
+
+  // Enforce session revocation via token versioning (global kill-switch / password reset)
+  const currentTokenVersion = user.token_version || 1;
+  const tokenVersionInJwt = payload.tokenVersion || 1;
+  if (tokenVersionInJwt < currentTokenVersion) {
+    throw new Error("UNAUTHORIZED: Session has been revoked by a security event or password reset");
+  }
+
   // Look up verified user memberships from database (never trust client claims)
   const memberships = await db.getUserMemberships(payload.sub);
   if (!memberships || memberships.length === 0) {

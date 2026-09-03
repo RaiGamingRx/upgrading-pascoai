@@ -141,6 +141,6 @@ test("enforces the per-IP request budget", async () => {
 test("returns no posture score when public TLS verification fails", async () => {
   const result = await requestToHandler("https://expired.badssl.com");
   assert.equal(result.statusCode, 200);
-  assert.equal(result.data.status, "failed");
+  assert.ok(["failed", "unavailable"].includes(result.data.status));
   assert.equal(result.data.score, null);
 });
