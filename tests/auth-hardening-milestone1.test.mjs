@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHmac } from "node:crypto";
 import { EnterpriseDbClient, inMemoryDb, closePool } from "../api/db-engine.ts";
 import {
   getJwtSecret,
+  getJwtVerificationSecrets,
+  getMfaEncryptionKey,
+  getMfaDecryptionKeys,
   validatePasswordPolicy,
+  JWT_CONFIG,
 } from "../api/auth-config.ts";
 import {
   hashPassword,
@@ -25,6 +30,8 @@ import {
   encryptMfaSecret,
   decryptMfaSecret,
   hashBackupCode,
+  isEncryptedMfaSecret,
+  migrateLegacyPlaintextMfaSecret,
 } from "../api/mfa-engine.ts";
 import { authenticateAndAuthorize } from "../api/rbac.ts";
 import authHandler from "../api/auth.ts";
@@ -537,6 +544,280 @@ test("PASCOAI PHASE 1 / MILESTONE 1 — ADVANCED AUTHENTICATION & SESSION HARDEN
     );
     assert.equal(resNewLogin.state.statusCode, 200);
     assert.equal(JSON.parse(resNewLogin.state.body).mfaRequired, true);
+  });
+
+  // --------------------------------------------------------------------------
+  // 9. Cryptographic Key Separation & Decryption Key Rotation
+  // --------------------------------------------------------------------------
+  await t.test("9. Cryptographic Key Separation & MFA Key Rotation", () => {
+    const origEnv = process.env.NODE_ENV;
+    const origJwt = process.env.AUTH_JWT_SECRET;
+    const origMfa = process.env.MFA_ENCRYPTION_KEY;
+    const origPrevMfa = process.env.MFA_ENCRYPTION_KEY_PREVIOUS;
+
+    try {
+      process.env.NODE_ENV = "production";
+      process.env.AUTH_JWT_SECRET = "production_jwt_signing_key_strictly_32_bytes!";
+      process.env.MFA_ENCRYPTION_KEY = "production_mfa_encryption_key_32_bytes_long!";
+      delete process.env.MFA_ENCRYPTION_KEY_PREVIOUS;
+
+      // 1. Separate keys are used for JWT and MFA
+      const jwtKey = getJwtSecret();
+      const mfaKey = getMfaEncryptionKey();
+      assert.notEqual(jwtKey, mfaKey, "JWT signing key and MFA encryption key must be distinct");
+
+      // 2. Encrypt an MFA secret with Key A
+      const rawSecret = "JBSWY3DPEHPK3PXP";
+      const encryptedWithKeyA = encryptMfaSecret(rawSecret);
+      assert.ok(isEncryptedMfaSecret(encryptedWithKeyA));
+      assert.equal(decryptMfaSecret(encryptedWithKeyA), rawSecret);
+
+      // 3. Rotate MFA key to Key B, keeping Key A in previous keys list
+      process.env.MFA_ENCRYPTION_KEY_PREVIOUS = process.env.MFA_ENCRYPTION_KEY;
+      process.env.MFA_ENCRYPTION_KEY = "new_active_mfa_encryption_key_32_bytes_here!";
+
+      // Existing secret encrypted with Key A must remain seamlessly decryptable
+      assert.equal(decryptMfaSecret(encryptedWithKeyA), rawSecret);
+
+      // 4. Encrypt new secret with Key B
+      const newRawSecret = "HXDMVJECJJWSRB3H";
+      const encryptedWithKeyB = encryptMfaSecret(newRawSecret);
+      assert.equal(decryptMfaSecret(encryptedWithKeyB), newRawSecret);
+
+      // 5. Fail closed if wrong keys provided (tampering or unknown key)
+      delete process.env.MFA_ENCRYPTION_KEY_PREVIOUS;
+      process.env.MFA_ENCRYPTION_KEY = "completely_unrelated_key_32_bytes_random!";
+      assert.throws(() => decryptMfaSecret(encryptedWithKeyA), /MFA_DECRYPTION_ERROR/);
+
+      // 6. Fail closed if legacy plaintext secret is passed without explicit migration
+      assert.throws(() => decryptMfaSecret("PLAINTEXT_SECRET_12345"), /MFA_DECRYPTION_ERROR/);
+
+      // 7. Migration helper successfully migrates legacy plaintext secret into authenticated envelope
+      const migrated = migrateLegacyPlaintextMfaSecret("PLAINTEXT_SECRET_12345");
+      assert.ok(isEncryptedMfaSecret(migrated));
+      assert.equal(decryptMfaSecret(migrated), "PLAINTEXT_SECRET_12345");
+    } finally {
+      process.env.NODE_ENV = origEnv;
+      if (origJwt) process.env.AUTH_JWT_SECRET = origJwt; else delete process.env.AUTH_JWT_SECRET;
+      if (origMfa) process.env.MFA_ENCRYPTION_KEY = origMfa; else delete process.env.MFA_ENCRYPTION_KEY;
+      if (origPrevMfa) process.env.MFA_ENCRYPTION_KEY_PREVIOUS = origPrevMfa; else delete process.env.MFA_ENCRYPTION_KEY_PREVIOUS;
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // 10. JWT Signing Key Rotation: Zero-Downtime Verification
+  // --------------------------------------------------------------------------
+  await t.test("10. Safe JWT Signing Key Rotation", () => {
+    const origEnv = process.env.NODE_ENV;
+    const origSecret = process.env.AUTH_JWT_SECRET;
+    const origPrev = process.env.AUTH_JWT_SECRET_PREVIOUS;
+
+    try {
+      process.env.NODE_ENV = "production";
+      process.env.AUTH_JWT_SECRET = "initial_production_jwt_signing_key_32_bytes!";
+      delete process.env.AUTH_JWT_SECRET_PREVIOUS;
+
+      // Token generated with initial secret
+      const tokenInitial = signAccessToken({
+        sub: "user-123",
+        email: "user@example.com",
+        displayName: "User One",
+        organizationId: "org-1",
+        workspaceId: "ws-1",
+        role: "admin",
+        tokenVersion: 1,
+      });
+
+      assert.ok(verifyAccessToken(tokenInitial));
+
+      // Key rotation occurs: new secret becomes active, old secret moved to previous
+      process.env.AUTH_JWT_SECRET_PREVIOUS = process.env.AUTH_JWT_SECRET;
+      process.env.AUTH_JWT_SECRET = "rotated_brand_new_production_jwt_key_32_bytes!";
+
+      // Tokens signed with the old secret still verify safely without dropping user sessions
+      const verifiedOldToken = verifyAccessToken(tokenInitial);
+      assert.ok(verifiedOldToken, "Old token must still verify against rotated keys");
+      assert.equal(verifiedOldToken.sub, "user-123");
+
+      // New tokens signed with rotated secret verify safely
+      const tokenNew = signAccessToken({
+        sub: "user-456",
+        email: "user456@example.com",
+        displayName: "User Two",
+        organizationId: "org-1",
+        workspaceId: "ws-1",
+        role: "member",
+        tokenVersion: 1,
+      });
+      const verifiedNewToken = verifyAccessToken(tokenNew);
+      assert.ok(verifiedNewToken);
+      assert.equal(verifiedNewToken.sub, "user-456");
+
+      // Unknown secret token rejected
+      const forgedToken = `${tokenInitial.split(".").slice(0, 2).join(".")}.invalid_signature`;
+      assert.equal(verifyAccessToken(forgedToken), null);
+    } finally {
+      process.env.NODE_ENV = origEnv;
+      if (origSecret) process.env.AUTH_JWT_SECRET = origSecret; else delete process.env.AUTH_JWT_SECRET;
+      if (origPrev) process.env.AUTH_JWT_SECRET_PREVIOUS = origPrev; else delete process.env.AUTH_JWT_SECRET_PREVIOUS;
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // 11. Concurrency Regression: Simultaneous Refresh Token Rotation Race Condition
+  // --------------------------------------------------------------------------
+  await t.test("11. Concurrency: Simultaneous Refresh Token Rotation Race", async () => {
+    // Create a new active test user
+    const raceUser = await db.createUser({
+      email: "concurrency_race_user@example.com",
+      passwordHash: "dummy_hash",
+      displayName: "Race User",
+    });
+
+    // Create initial refresh token
+    const initialToken = await createRefreshToken(db, raceUser.id);
+
+    // Simulate two simultaneous callers presenting the exact same refresh token at the exact same instant
+    const [resultA, resultB] = await Promise.all([
+      rotateRefreshToken(db, initialToken.rawToken),
+      rotateRefreshToken(db, initialToken.rawToken),
+    ]);
+
+    // Exactly one of the callers must succeed, and one must fail (or trigger reuse detection)
+    const successCount = (resultA !== null ? 1 : 0) + (resultB !== null ? 1 : 0);
+    assert.equal(successCount, 1, "Exactly one concurrent caller must succeed in rotating the token");
+
+    // The successful rotation must produce a valid new token
+    const successfulResult = resultA || resultB;
+    assert.ok(successfulResult);
+    assert.ok(successfulResult.newRawToken);
+
+    // Replay attack: presenting the original rawToken again MUST trigger reuse detection
+    const replayResult = await rotateRefreshToken(db, initialToken.rawToken);
+    assert.equal(replayResult, null, "Replaying an already-rotated token must fail immediately");
+
+    // Replay detection must have invalidated the entire family!
+    // Therefore, rotating the new token issued to the winner must now ALSO fail because family was nuked!
+    const subsequentResult = await rotateRefreshToken(db, successfulResult.newRawToken);
+    assert.equal(subsequentResult, null, "Compromise detection must have invalidated the entire token family");
+  });
+
+  // --------------------------------------------------------------------------
+  // 12. Concurrency Regression: Simultaneous Backup Code Consumption
+  // --------------------------------------------------------------------------
+  await t.test("12. Concurrency: Simultaneous Backup Code Consumption", async () => {
+    // Generate a backup code
+    const rawBackupCode = "9A8B-7C6D";
+    const hashedCode = hashBackupCode(rawBackupCode);
+
+    const backupUser = await db.createUser({
+      email: "concurrency_backup_user@example.com",
+      passwordHash: "dummy_hash",
+      displayName: "Backup User",
+      mfaEnabled: true,
+      mfaSecret: encryptMfaSecret(generateMfaSecret()),
+      mfaBackupCodes: [hashedCode],
+    });
+
+    // Two concurrent requests attempt to consume the same backup code simultaneously
+    const [consumeA, consumeB] = await Promise.all([
+      db.consumeUserBackupCode(backupUser.id, hashedCode),
+      db.consumeUserBackupCode(backupUser.id, hashedCode),
+    ]);
+
+    const successes = (consumeA.success ? 1 : 0) + (consumeB.success ? 1 : 0);
+    assert.equal(successes, 1, "Atomic backup code consumption must allow exactly one consumer to succeed");
+
+    // User's remaining backup codes in database must now be 0
+    const updatedUser = await db.findUserById(backupUser.id);
+    assert.equal(updatedUser.mfa_backup_codes.length, 0, "Consumed backup code must be permanently removed");
+
+    // Subsequent attempt with the same code must fail
+    const thirdAttempt = await db.consumeUserBackupCode(backupUser.id, hashedCode);
+    assert.equal(thirdAttempt.success, false, "Subsequent attempt to use consumed code must fail");
+  });
+
+  // --------------------------------------------------------------------------
+  // 13. MFA Challenge Replay Resistance & Brute-Force Rate Limiting
+  // --------------------------------------------------------------------------
+  await t.test("13. MFA Challenge Replay Resistance & Rate Limiting", async () => {
+    const mfaTestUser = await db.createUser({
+      email: "mfa_challenge_user@example.com",
+      passwordHash: "dummy_hash",
+      displayName: "MFA User",
+      mfaEnabled: true,
+      mfaSecret: encryptMfaSecret(generateMfaSecret()),
+    });
+
+    // Sign challenge token with unique JTI
+    const challengeToken = signMfaChallengeToken(mfaTestUser.id, mfaTestUser.email);
+    const verifiedPayload = verifyMfaChallengeToken(challengeToken);
+    assert.ok(verifiedPayload);
+    assert.ok(verifiedPayload.jti, "Challenge payload must contain unique JTI claim");
+
+    // Attempt 1: First consumption succeeds
+    const firstConsume = await db.consumeMfaChallenge(
+      verifiedPayload.jti,
+      mfaTestUser.id,
+      new Date(verifiedPayload.exp * 1000)
+    );
+    assert.equal(firstConsume, true, "First consumption of MFA challenge must succeed");
+
+    // Attempt 2: Replay of the exact same challenge token MUST fail
+    const replayConsume = await db.consumeMfaChallenge(
+      verifiedPayload.jti,
+      mfaTestUser.id,
+      new Date(verifiedPayload.exp * 1000)
+    );
+    assert.equal(replayConsume, false, "Replay of consumed MFA challenge must be rejected");
+
+    // Test challenge brute-force lockout:
+    const newChallengeToken = signMfaChallengeToken(mfaTestUser.id, mfaTestUser.email);
+    const newPayload = verifyMfaChallengeToken(newChallengeToken);
+
+    // Record 5 failed attempts
+    for (let i = 0; i < 5; i++) {
+      await db.recordMfaChallengeFailedAttempt(newPayload.jti);
+    }
+    const failedCount = await db.getMfaChallengeFailedAttempts(newPayload.jti);
+    assert.equal(failedCount, 5, "Failed attempts count must be recorded accurately");
+  });
+
+  // --------------------------------------------------------------------------
+  // 14. Atomic Single-Use of Password Reset & Email Verification Tokens
+  // --------------------------------------------------------------------------
+  await t.test("14. Atomic Single-Use of Password Reset & Email Tokens", async () => {
+    const singleUseUser = await db.createUser({
+      email: "single_use_user@example.com",
+      passwordHash: "dummy_hash",
+      displayName: "Single Use User",
+    });
+
+    // 1. Password Reset Token
+    const resetHash = "sample_reset_hash_123456789";
+    await db.savePasswordResetToken(singleUseUser.id, resetHash, new Date(Date.now() + 3600000));
+    const resetRecord = await db.findPasswordResetToken(resetHash);
+    assert.ok(resetRecord);
+
+    // Race two concurrent markPasswordResetTokenUsed calls
+    const [resetMarkA, resetMarkB] = await Promise.all([
+      db.markPasswordResetTokenUsed(resetRecord.id),
+      db.markPasswordResetTokenUsed(resetRecord.id),
+    ]);
+    assert.equal((resetMarkA ? 1 : 0) + (resetMarkB ? 1 : 0), 1, "Password reset token can only be consumed once");
+
+    // 2. Email Verification Token
+    const verifyHash = "sample_verify_hash_123456789";
+    await db.saveEmailVerificationToken(singleUseUser.id, verifyHash, new Date(Date.now() + 3600000));
+    const verifyRecord = await db.findEmailVerificationToken(verifyHash);
+    assert.ok(verifyRecord);
+
+    // Race two concurrent markEmailVerificationTokenUsed calls
+    const [verifyMarkA, verifyMarkB] = await Promise.all([
+      db.markEmailVerificationTokenUsed(verifyRecord.id),
+      db.markEmailVerificationTokenUsed(verifyRecord.id),
+    ]);
+    assert.equal((verifyMarkA ? 1 : 0) + (verifyMarkB ? 1 : 0), 1, "Email verification token can only be consumed once");
   });
 
   await closePool();

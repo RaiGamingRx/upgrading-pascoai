@@ -13,10 +13,11 @@
  * 5. Production mode MANDATES DATABASE_URL and refuses to start with in-memory fallback.
  */
 
-import { randomUUID } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import pg, { type PoolClient } from "pg";
+import { encryptMfaSecret, isEncryptedMfaSecret } from "./mfa-engine.ts";
 
 const { Pool } = pg;
 
@@ -321,6 +322,20 @@ CREATE TABLE IF NOT EXISTS email_verification_tokens (
 CREATE INDEX IF NOT EXISTS idx_email_verify_hash ON email_verification_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_email_verify_user ON email_verification_tokens(user_id);
 
+CREATE TABLE IF NOT EXISTS consumed_mfa_challenges (
+    jti VARCHAR(64) PRIMARY KEY,
+    user_id UUID NOT NULL,
+    consumed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mfa_challenge_expires ON consumed_mfa_challenges(expires_at);
+
+CREATE TABLE IF NOT EXISTS mfa_challenge_attempts (
+    jti VARCHAR(64) PRIMARY KEY,
+    failed_attempts INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS assets (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -471,6 +486,84 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret VARCHAR(512) NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_backup_codes TEXT[] DEFAULT '{}';
 ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS revocation_reason VARCHAR(64) NULL;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    id VARCHAR(255) PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_reset_token_hash ON password_reset_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_reset_token_user ON password_reset_tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_email_verify_hash ON email_verification_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_email_verify_user ON email_verification_tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS consumed_mfa_challenges (
+    jti VARCHAR(64) PRIMARY KEY,
+    user_id UUID NOT NULL,
+    consumed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mfa_challenge_expires ON consumed_mfa_challenges(expires_at);
+
+CREATE TABLE IF NOT EXISTS mfa_challenge_attempts (
+    jti VARCHAR(64) PRIMARY KEY,
+    failed_attempts INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS auth_rate_limits (
+    key VARCHAR(255) PRIMARY KEY,
+    points INT NOT NULL DEFAULT 0,
+    window_start TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_expires ON auth_rate_limits(expires_at);
+
+CREATE TABLE IF NOT EXISTS account_security_states (
+    identifier VARCHAR(320) PRIMARY KEY,
+    failed_attempts INT NOT NULL DEFAULT 0,
+    last_failed_at TIMESTAMPTZ NULL,
+    locked_until TIMESTAMPTZ NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_account_sec_locked ON account_security_states(locked_until);
+
+ALTER TABLE audit_logs ALTER COLUMN organization_id DROP NOT NULL;
+
+CREATE TABLE IF NOT EXISTS auth_security_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    event_type VARCHAR(64) NOT NULL,
+    severity VARCHAR(16) NOT NULL CHECK (severity IN ('info', 'low', 'medium', 'high', 'critical')),
+    actor_ip VARCHAR(45) NOT NULL,
+    actor_id UUID NULL,
+    target_identifier VARCHAR(320) NULL,
+    organization_id UUID NULL,
+    status VARCHAR(16) NOT NULL CHECK (status IN ('success', 'failure', 'blocked')),
+    reason VARCHAR(128) NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sec_events_type ON auth_security_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_sec_events_ip ON auth_security_events(actor_ip);
+CREATE INDEX IF NOT EXISTS idx_sec_events_target ON auth_security_events(target_identifier);
+CREATE INDEX IF NOT EXISTS idx_sec_events_created ON auth_security_events(created_at);
 `;
 
 export async function runMigrations(pool?: pg.Pool): Promise<void> {
@@ -480,24 +573,51 @@ export async function runMigrations(pool?: pg.Pool): Promise<void> {
   
   if (!migrationPromise) {
     migrationPromise = (async () => {
-      let migrationSql = SCHEMA_SQL;
-      const migrationFilePath = resolve(process.cwd(), "migrations/001_enterprise_multitenant_schema.sql");
-      if (existsSync(migrationFilePath)) {
-        try {
-          migrationSql = readFileSync(migrationFilePath, "utf-8");
-        } catch {
-          // Fall back to SCHEMA_SQL constant
-        }
-      }
-      
       const client = await targetPool.connect();
       try {
-        await client.query("BEGIN");
-        await client.query(migrationSql);
-        await client.query("COMMIT");
-      } catch (err) {
-        await client.query("ROLLBACK").catch(() => {});
-        throw err;
+        // 1. Ensure migrations tracking table exists
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS schema_migrations (
+            id VARCHAR(255) PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+        `);
+
+        // 2. Fetch already applied migrations
+        const appliedRes = await client.query("SELECT id FROM schema_migrations");
+        const appliedIds = new Set(appliedRes.rows.map((r: any) => r.id));
+
+        // 3. Discover and execute migration files in sequential order
+        const migrationsDir = resolve(process.cwd(), "migrations");
+        if (existsSync(migrationsDir)) {
+          const files = readdirSync(migrationsDir)
+            .filter((f: string) => f.endsWith(".sql"))
+            .sort();
+
+          for (const file of files) {
+            if (!appliedIds.has(file)) {
+              const content = readFileSync(resolve(migrationsDir, file), "utf-8");
+              await client.query("BEGIN");
+              try {
+                await client.query(content);
+                await client.query(
+                  "INSERT INTO schema_migrations (id, applied_at) VALUES ($1, NOW()) ON CONFLICT (id) DO NOTHING",
+                  [file]
+                );
+                await client.query("COMMIT");
+                appliedIds.add(file);
+              } catch (migrationErr) {
+                await client.query("ROLLBACK").catch(() => {});
+                throw migrationErr;
+              }
+            }
+          }
+        } else {
+          // Fall back to SCHEMA_SQL
+          await client.query("BEGIN");
+          await client.query(SCHEMA_SQL);
+          await client.query("COMMIT");
+        }
       } finally {
         client.release();
       }
@@ -692,6 +812,8 @@ class InMemoryEnterpriseDb {
   scans = new Map<string, ScanRecord>();
   findings = new Map<string, FindingRecord>();
   auditLogs = new Map<string, AuditLogRecord>();
+  consumedMfaChallenges = new Map<string, { userId: string; expiresAtMs: number }>();
+  mfaChallengeAttempts = new Map<string, number>();
 
   clear() {
     this.organizations.clear();
@@ -705,6 +827,8 @@ class InMemoryEnterpriseDb {
     this.scans.clear();
     this.findings.clear();
     this.auditLogs.clear();
+    this.consumedMfaChallenges.clear();
+    this.mfaChallengeAttempts.clear();
   }
 }
 
@@ -797,15 +921,32 @@ export class EnterpriseDbClient {
 
   async createUser(data: {
     email: string;
-    display_name: string;
-    password_hash: string;
+    display_name?: string;
+    displayName?: string;
+    password_hash?: string;
+    passwordHash?: string;
     is_active?: boolean;
+    isActive?: boolean;
     token_version?: number;
+    tokenVersion?: number;
     email_verified?: boolean;
+    emailVerified?: boolean;
     mfa_enabled?: boolean;
+    mfaEnabled?: boolean;
     mfa_secret?: string | null;
+    mfaSecret?: string | null;
     mfa_backup_codes?: string[];
+    mfaBackupCodes?: string[];
   }): Promise<UserRecord> {
+    const displayName = data.display_name ?? data.displayName ?? "";
+    const passwordHash = data.password_hash ?? data.passwordHash ?? "";
+    const isActive = data.is_active ?? data.isActive ?? true;
+    const tokenVersion = data.token_version ?? data.tokenVersion ?? 1;
+    const emailVerified = data.email_verified ?? data.emailVerified ?? false;
+    const mfaEnabled = data.mfa_enabled ?? data.mfaEnabled ?? false;
+    const mfaSecret = data.mfa_secret !== undefined ? data.mfa_secret : (data.mfaSecret !== undefined ? data.mfaSecret : null);
+    const mfaBackupCodes = data.mfa_backup_codes ?? data.mfaBackupCodes ?? [];
+
     const driver = getActiveDriver();
     if (driver === "postgres") {
       return this.withSystemTransaction(async (client) => {
@@ -817,13 +958,31 @@ export class EnterpriseDbClient {
           throw new Error("User with this email already exists");
         }
         const id = randomUUID();
-        const res = await client.query(
-          `INSERT INTO users (id, email, display_name, password_hash, is_active, token_version, email_verified, mfa_enabled, mfa_secret, mfa_backup_codes, created_at, updated_at)
-           VALUES ($1, LOWER($2), $3, $4, $5, 1, FALSE, FALSE, NULL, '{}', NOW(), NOW())
-           RETURNING *`,
-          [id, data.email, data.display_name, data.password_hash, data.is_active ?? true]
-        );
-        return mapUser(res.rows[0]);
+        try {
+          const res = await client.query(
+            `INSERT INTO users (id, email, display_name, password_hash, is_active, token_version, email_verified, mfa_enabled, mfa_secret, mfa_backup_codes, created_at, updated_at)
+             VALUES ($1, LOWER($2), $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+             RETURNING *`,
+            [
+              id,
+              data.email,
+              displayName,
+              passwordHash,
+              isActive,
+              tokenVersion,
+              emailVerified,
+              mfaEnabled,
+              mfaSecret,
+              mfaBackupCodes,
+            ]
+          );
+          return mapUser(res.rows[0]);
+        } catch (err: any) {
+          if (err?.code === "23505" || err?.message?.includes("unique") || err?.message?.includes("duplicate")) {
+            throw new Error("User with this email already exists");
+          }
+          throw err;
+        }
       });
     }
 
@@ -839,9 +998,128 @@ export class EnterpriseDbClient {
     const user: UserRecord = {
       id,
       email: data.email.toLowerCase(),
-      display_name: data.display_name,
-      password_hash: data.password_hash,
-      is_active: data.is_active ?? true,
+      display_name: displayName,
+      password_hash: passwordHash,
+      is_active: isActive,
+      token_version: tokenVersion,
+      email_verified: emailVerified,
+      mfa_enabled: mfaEnabled,
+      mfa_secret: mfaSecret,
+      mfa_backup_codes: mfaBackupCodes,
+      created_at: now,
+      updated_at: now,
+    };
+    inMemoryDb.users.set(id, user);
+    return user;
+  }
+
+  /**
+   * Atomically provisions an enterprise tenant (User + Organization + Workspace + WorkspaceMember).
+   * Fully rolled back on any failure, preventing orphaned records or race conditions.
+   */
+  async registerEnterpriseTenant(params: {
+    email: string;
+    displayName: string;
+    passwordHash: string;
+    organizationName?: string;
+    workspaceName?: string;
+  }): Promise<{
+    user: UserRecord;
+    organization: OrganizationRecord;
+    workspace: WorkspaceRecord;
+    member: WorkspaceMemberRecord;
+  }> {
+    const normalizedEmail = params.email.trim().toLowerCase();
+    const orgName = params.organizationName?.trim() || "Default Organization";
+    const wsName = params.workspaceName?.trim() || "Production Perimeter";
+    const orgSlug =
+      orgName.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").slice(0, 50) +
+      "-" +
+      randomUUID().slice(0, 8);
+
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      return this.withSystemTransaction(async (client) => {
+        // 1. Check duplicate user
+        const existing = await client.query(
+          "SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+          [normalizedEmail]
+        );
+        if (existing.rows.length > 0) {
+          throw new Error("User with this email already exists");
+        }
+
+        // 2. Insert user
+        const userId = randomUUID();
+        let userRow: any;
+        try {
+          const uRes = await client.query(
+            `INSERT INTO users (id, email, display_name, password_hash, is_active, token_version, email_verified, mfa_enabled, mfa_secret, mfa_backup_codes, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, TRUE, 1, FALSE, FALSE, NULL, '{}', NOW(), NOW())
+             RETURNING *`,
+            [userId, normalizedEmail, params.displayName, params.passwordHash]
+          );
+          userRow = uRes.rows[0];
+        } catch (err: any) {
+          if (err?.code === "23505" || err?.message?.includes("unique") || err?.message?.includes("duplicate")) {
+            throw new Error("User with this email already exists");
+          }
+          throw err;
+        }
+
+        // 3. Create org
+        const orgId = randomUUID();
+        const oRes = await client.query(
+          `INSERT INTO organizations (id, name, slug, tier, retention_days, created_at, updated_at)
+           VALUES ($1, $2, $3, 'enterprise', 365, NOW(), NOW())
+           RETURNING *`,
+          [orgId, orgName, orgSlug]
+        );
+
+        // 4. Create workspace
+        await client.query("SELECT set_config('app.current_org_id', $1, true)", [orgId]);
+        const wsId = randomUUID();
+        const wRes = await client.query(
+          `INSERT INTO workspaces (id, organization_id, name, environment, is_default, created_at, updated_at)
+           VALUES ($1, $2, $3, 'production', TRUE, NOW(), NOW())
+           RETURNING *`,
+          [wsId, orgId, wsName]
+        );
+
+        // 5. Add workspace member
+        const memId = randomUUID();
+        const mRes = await client.query(
+          `INSERT INTO workspace_members (id, organization_id, workspace_id, user_id, role, joined_at)
+           VALUES ($1, $2, $3, $4, 'org_admin', NOW())
+           RETURNING *`,
+          [memId, orgId, wsId, userId]
+        );
+
+        return {
+          user: mapUser(userRow),
+          organization: mapOrganization(oRes.rows[0]),
+          workspace: mapWorkspace(wRes.rows[0]),
+          member: mapWorkspaceMember(mRes.rows[0]),
+        };
+      });
+    }
+
+    // In-memory atomic registration
+    const existing = Array.from(inMemoryDb.users.values()).find(
+      u => u.email.toLowerCase() === normalizedEmail
+    );
+    if (existing) {
+      throw new Error("User with this email already exists");
+    }
+
+    const userId = randomUUID();
+    const now = new Date().toISOString();
+    const user: UserRecord = {
+      id: userId,
+      email: normalizedEmail,
+      display_name: params.displayName,
+      password_hash: params.passwordHash,
+      is_active: true,
       token_version: 1,
       email_verified: false,
       mfa_enabled: false,
@@ -850,8 +1128,44 @@ export class EnterpriseDbClient {
       created_at: now,
       updated_at: now,
     };
-    inMemoryDb.users.set(id, user);
-    return user;
+    inMemoryDb.users.set(userId, user);
+
+    const orgId = randomUUID();
+    const org: OrganizationRecord = {
+      id: orgId,
+      name: orgName,
+      slug: orgSlug,
+      tier: "enterprise",
+      retention_days: 365,
+      created_at: now,
+      updated_at: now,
+    };
+    inMemoryDb.organizations.set(orgId, org);
+
+    const wsId = randomUUID();
+    const ws: WorkspaceRecord = {
+      id: wsId,
+      organization_id: orgId,
+      name: wsName,
+      environment: "production",
+      is_default: true,
+      created_at: now,
+      updated_at: now,
+    };
+    inMemoryDb.workspaces.set(wsId, ws);
+
+    const memId = randomUUID();
+    const member: WorkspaceMemberRecord = {
+      id: memId,
+      organization_id: orgId,
+      workspace_id: wsId,
+      user_id: userId,
+      role: "org_admin",
+      joined_at: now,
+    };
+    inMemoryDb.workspaceMembers.set(memId, member);
+
+    return { user, organization: org, workspace: ws, member };
   }
 
   async findUserByEmail(email: string): Promise<UserRecord | null> {
@@ -932,6 +1246,14 @@ export class EnterpriseDbClient {
     userId: string,
     mfa: { enabled: boolean; secret?: string | null; backupCodes?: string[] }
   ): Promise<void> {
+    // Defense-in-depth: Ensure any provided secret is stored encrypted with AES-256-GCM authenticated envelope
+    let normalizedSecret: string | null | undefined = mfa.secret;
+    if (normalizedSecret !== undefined && normalizedSecret !== null) {
+      if (!isEncryptedMfaSecret(normalizedSecret)) {
+        normalizedSecret = encryptMfaSecret(normalizedSecret);
+      }
+    }
+
     const driver = getActiveDriver();
     if (driver === "postgres") {
       return this.withSystemTransaction(async (client) => {
@@ -953,7 +1275,7 @@ export class EnterpriseDbClient {
                  mfa_backup_codes = COALESCE($2, mfa_backup_codes), 
                  updated_at = NOW() 
              WHERE id = $3`,
-            [mfa.secret !== undefined ? mfa.secret : null, mfa.backupCodes !== undefined ? mfa.backupCodes : null, userId]
+            [normalizedSecret !== undefined ? normalizedSecret : null, mfa.backupCodes !== undefined ? mfa.backupCodes : null, userId]
           );
         }
       });
@@ -966,10 +1288,109 @@ export class EnterpriseDbClient {
         user.mfa_secret = null;
         user.mfa_backup_codes = [];
       } else {
-        if (mfa.secret !== undefined) user.mfa_secret = mfa.secret;
+        if (normalizedSecret !== undefined) user.mfa_secret = normalizedSecret;
         if (mfa.backupCodes !== undefined) user.mfa_backup_codes = mfa.backupCodes;
       }
       user.updated_at = new Date().toISOString();
+    }
+  }
+
+  /**
+   * Scans and safely migrates any legacy unencrypted plaintext MFA secrets into AES-256-GCM envelopes
+   */
+  async migrateLegacyPlaintextMfaSecrets(): Promise<number> {
+    let count = 0;
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        "SELECT id, mfa_secret FROM users WHERE mfa_secret IS NOT NULL AND mfa_secret NOT LIKE '%.%.%'"
+      );
+      for (const row of res.rows) {
+        const encrypted = encryptMfaSecret(row.mfa_secret);
+        await pool.query("UPDATE users SET mfa_secret = $1, updated_at = NOW() WHERE id = $2", [encrypted, row.id]);
+        count++;
+      }
+      return count;
+    }
+
+    for (const user of inMemoryDb.users.values()) {
+      if (user.mfa_secret && !isEncryptedMfaSecret(user.mfa_secret)) {
+        user.mfa_secret = encryptMfaSecret(user.mfa_secret);
+        user.updated_at = new Date().toISOString();
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Atomically verifies and consumes a single-use backup code.
+   * Concurrency-safe: Exactly one request will succeed if multiple simultaneous requests arrive.
+   */
+  async consumeUserBackupCode(userId: string, codeHash: string): Promise<{ success: boolean; remainingCodes: string[] }> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        `UPDATE users
+         SET mfa_backup_codes = array_remove(mfa_backup_codes, $2), updated_at = NOW()
+         WHERE id = $1 AND $2 = ANY(mfa_backup_codes)
+         RETURNING mfa_backup_codes`,
+        [userId, codeHash]
+      );
+      if (res.rows.length > 0) {
+        return { success: true, remainingCodes: res.rows[0].mfa_backup_codes || [] };
+      }
+      return { success: false, remainingCodes: [] };
+    }
+
+    const user = inMemoryDb.users.get(userId);
+    if (!user || !Array.isArray(user.mfa_backup_codes)) {
+      return { success: false, remainingCodes: [] };
+    }
+
+    const codeBuf = Buffer.from(codeHash, "utf8");
+    const matchIdx = user.mfa_backup_codes.findIndex((storedHash) => {
+      const storedBuf = Buffer.from(storedHash, "utf8");
+      return codeBuf.length === storedBuf.length && timingSafeEqual(codeBuf, storedBuf);
+    });
+
+    if (matchIdx === -1) {
+      return { success: false, remainingCodes: [...user.mfa_backup_codes] };
+    }
+
+    // Synchronous splice in single-threaded event loop ensures atomic consumption
+    user.mfa_backup_codes.splice(matchIdx, 1);
+    user.updated_at = new Date().toISOString();
+    return { success: true, remainingCodes: [...user.mfa_backup_codes] };
+  }
+
+  /**
+   * Restores a previously consumed backup code in the event of an aborted MFA challenge transaction
+   */
+  async restoreUserBackupCode(userId: string, codeHash: string): Promise<void> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      await pool.query(
+        `UPDATE users
+         SET mfa_backup_codes = array_append(mfa_backup_codes, $2), updated_at = NOW()
+         WHERE id = $1 AND NOT ($2 = ANY(mfa_backup_codes))`,
+        [userId, codeHash]
+      );
+      return;
+    }
+
+    const user = inMemoryDb.users.get(userId);
+    if (user && Array.isArray(user.mfa_backup_codes)) {
+      if (!user.mfa_backup_codes.includes(codeHash)) {
+        user.mfa_backup_codes.push(codeHash);
+        user.updated_at = new Date().toISOString();
+      }
     }
   }
 
@@ -1086,22 +1507,24 @@ export class EnterpriseDbClient {
     return found || null;
   }
 
-  async markPasswordResetTokenUsed(tokenId: string): Promise<void> {
+  async markPasswordResetTokenUsed(tokenId: string): Promise<boolean> {
     const driver = getActiveDriver();
     if (driver === "postgres") {
       const pool = getPool();
       await runMigrations(pool);
-      await pool.query(
-        "UPDATE password_reset_tokens SET used_at = NOW() WHERE id = $1",
+      const res = await pool.query(
+        "UPDATE password_reset_tokens SET used_at = NOW() WHERE id = $1 AND used_at IS NULL RETURNING id",
         [tokenId]
       );
-      return;
+      return (res.rowCount ?? 0) > 0;
     }
 
     const record = inMemoryDb.passwordResetTokens.get(tokenId);
-    if (record) {
-      record.used_at = new Date().toISOString();
+    if (!record || record.used_at) {
+      return false;
     }
+    record.used_at = new Date().toISOString();
+    return true;
   }
 
   async saveEmailVerificationToken(userId: string, tokenHash: string, expiresAt: Date): Promise<EmailVerificationTokenRecord> {
@@ -1151,22 +1574,24 @@ export class EnterpriseDbClient {
     return found || null;
   }
 
-  async markEmailVerificationTokenUsed(tokenId: string): Promise<void> {
+  async markEmailVerificationTokenUsed(tokenId: string): Promise<boolean> {
     const driver = getActiveDriver();
     if (driver === "postgres") {
       const pool = getPool();
       await runMigrations(pool);
-      await pool.query(
-        "UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1",
+      const res = await pool.query(
+        "UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1 AND used_at IS NULL RETURNING id",
         [tokenId]
       );
-      return;
+      return (res.rowCount ?? 0) > 0;
     }
 
     const record = inMemoryDb.emailVerificationTokens.get(tokenId);
-    if (record) {
-      record.used_at = new Date().toISOString();
+    if (!record || record.used_at) {
+      return false;
     }
+    record.used_at = new Date().toISOString();
+    return true;
   }
 
   // --------------------------------------------------------------------------
@@ -1423,6 +1848,164 @@ export class EnterpriseDbClient {
       record.revoked_at = new Date().toISOString();
       record.revocation_reason = reason;
     }
+  }
+
+  /**
+   * Concurrency-safe atomic refresh token consumption.
+   * Guarantees exactly one consumer succeeds when simultaneous rotation requests arrive.
+   * If the token was already revoked, reuseDetected is flagged to trigger family revocation.
+   */
+  async atomicConsumeRefreshToken(tokenHash: string, reason = "ROTATION"): Promise<{
+    consumed: boolean;
+    record: RefreshTokenRecord | null;
+    reuseDetected: boolean;
+  }> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      // Attempt atomic update of active, unexpired token
+      const res = await pool.query(
+        `UPDATE refresh_tokens
+         SET is_revoked = TRUE, revoked_at = NOW(), revocation_reason = $2
+         WHERE token_hash = $1 AND is_revoked = FALSE AND expires_at > NOW()
+         RETURNING *`,
+        [tokenHash, reason]
+      );
+      if (res.rows.length > 0) {
+        return { consumed: true, record: mapRefreshToken(res.rows[0]), reuseDetected: false };
+      }
+
+      // Check if token exists but was already revoked (reuse/replay) or expired
+      const checkRes = await pool.query(
+        "SELECT * FROM refresh_tokens WHERE token_hash = $1 LIMIT 1",
+        [tokenHash]
+      );
+      if (checkRes.rows.length === 0) {
+        return { consumed: false, record: null, reuseDetected: false };
+      }
+      const record = mapRefreshToken(checkRes.rows[0]);
+      if (record.is_revoked) {
+        return { consumed: false, record, reuseDetected: true };
+      }
+      // Expired token: mark revoked
+      await pool.query(
+        "UPDATE refresh_tokens SET is_revoked = TRUE, revoked_at = NOW(), revocation_reason = 'EXPIRED' WHERE id = $1",
+        [record.id]
+      );
+      return { consumed: false, record, reuseDetected: false };
+    }
+
+    const record = Array.from(inMemoryDb.refreshTokens.values()).find(t => t.token_hash === tokenHash);
+    if (!record) {
+      return { consumed: false, record: null, reuseDetected: false };
+    }
+    if (record.is_revoked) {
+      return { consumed: false, record, reuseDetected: true };
+    }
+    if (new Date(record.expires_at).getTime() <= Date.now()) {
+      record.is_revoked = true;
+      record.revoked_at = new Date().toISOString();
+      record.revocation_reason = "EXPIRED";
+      return { consumed: false, record, reuseDetected: false };
+    }
+
+    record.is_revoked = true;
+    record.revoked_at = new Date().toISOString();
+    record.revocation_reason = reason;
+    return { consumed: true, record, reuseDetected: false };
+  }
+
+  /**
+   * Single-use MFA challenge consumption.
+   * Prevents replay of completed or active MFA challenge tokens.
+   */
+  async consumeMfaChallenge(jti: string, userId: string, expiresAt: Date): Promise<boolean> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      try {
+        const res = await pool.query(
+          `INSERT INTO consumed_mfa_challenges (jti, user_id, consumed_at, expires_at)
+           VALUES ($1, $2, NOW(), $3)
+           ON CONFLICT (jti) DO NOTHING
+           RETURNING jti`,
+          [jti, userId, expiresAt.toISOString()]
+        );
+        return (res.rowCount ?? 0) > 0;
+      } catch {
+        return false;
+      }
+    }
+
+    if (inMemoryDb.consumedMfaChallenges.has(jti)) {
+      return false;
+    }
+    inMemoryDb.consumedMfaChallenges.set(jti, { userId, expiresAtMs: expiresAt.getTime() });
+    return true;
+  }
+
+  /**
+   * Checks whether an MFA challenge token (jti) has already been consumed
+   */
+  async isMfaChallengeConsumed(jti: string): Promise<boolean> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      try {
+        const res = await pool.query(
+          "SELECT jti FROM consumed_mfa_challenges WHERE jti = $1 LIMIT 1",
+          [jti]
+        );
+        return (res.rowCount ?? 0) > 0;
+      } catch {
+        return false;
+      }
+    }
+    return inMemoryDb.consumedMfaChallenges.has(jti);
+  }
+
+  /**
+   * Tracks failed MFA verification attempts against a challenge token.
+   * Mitigates online guessing / brute-force within the challenge lifetime.
+   */
+  async recordMfaChallengeFailedAttempt(jti: string): Promise<{ attempts: number; locked: boolean }> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        `INSERT INTO mfa_challenge_attempts (jti, failed_attempts, updated_at)
+         VALUES ($1, 1, NOW())
+         ON CONFLICT (jti) DO UPDATE
+         SET failed_attempts = mfa_challenge_attempts.failed_attempts + 1, updated_at = NOW()
+         RETURNING failed_attempts`,
+        [jti]
+      );
+      const attempts = res.rows[0]?.failed_attempts ?? 1;
+      return { attempts, locked: attempts >= 5 };
+    }
+
+    const current = (inMemoryDb.mfaChallengeAttempts.get(jti) || 0) + 1;
+    inMemoryDb.mfaChallengeAttempts.set(jti, current);
+    return { attempts: current, locked: current >= 5 };
+  }
+
+  async getMfaChallengeFailedAttempts(jti: string): Promise<number> {
+    const driver = getActiveDriver();
+    if (driver === "postgres") {
+      const pool = getPool();
+      await runMigrations(pool);
+      const res = await pool.query(
+        "SELECT failed_attempts FROM mfa_challenge_attempts WHERE jti = $1",
+        [jti]
+      );
+      return res.rows[0]?.failed_attempts ?? 0;
+    }
+
+    return inMemoryDb.mfaChallengeAttempts.get(jti) || 0;
   }
 
   async revokeAllUserRefreshTokens(userId: string, reason = "LOGOUT_ALL"): Promise<number> {

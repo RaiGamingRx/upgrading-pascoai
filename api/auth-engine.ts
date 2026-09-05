@@ -11,11 +11,13 @@
  * - Secure Cookie serialization.
  */
 
-import { createHmac, randomBytes, createHash, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { argon2id } from "hash-wasm";
 import { EnterpriseDbClient, type UserRecord, type WorkspaceMemberRecord } from "./db-engine.ts";
+import { SecurityAuditService } from "./security-audit.ts";
 import {
   getJwtSecret,
+  getJwtVerificationSecrets,
   TOKEN_LIFETIMES,
   JWT_CONFIG,
 } from "./auth-config.ts";
@@ -28,6 +30,7 @@ export interface AccessTokenPayload {
   workspaceId: string;
   role: WorkspaceMemberRecord['role'];
   tokenVersion: number;
+  type?: "access_token";
   iat: number;
   exp: number;
   iss: string;
@@ -38,6 +41,7 @@ export interface MfaChallengePayload {
   sub: string;
   email: string;
   type: "mfa_challenge";
+  jti: string;
   iat: number;
   exp: number;
   iss: string;
@@ -163,6 +167,7 @@ export function signAccessToken(
 
   const fullPayload: AccessTokenPayload = {
     ...payload,
+    type: "access_token",
     tokenVersion: payload.tokenVersion || 1,
     iat: now,
     exp: now + TOKEN_LIFETIMES.ACCESS_TOKEN_SEC,
@@ -192,26 +197,40 @@ export function verifyAccessToken(token: string): AccessTokenPayload | null {
     const [headerB64, bodyB64, signature] = parts;
     if (!headerB64 || !bodyB64 || !signature) return null;
 
-    // Verify algorithm header
+    // Verify algorithm and type headers
     const header = JSON.parse(Buffer.from(headerB64, "base64url").toString("utf8"));
     if (header.alg !== JWT_CONFIG.ALGORITHM || header.typ !== "JWT") {
       return null;
     }
 
-    const secret = getJwtSecret();
-    const expectedSig = createHmac("sha256", secret)
-      .update(`${headerB64}.${bodyB64}`)
-      .digest("base64url");
-
+    // Support safe zero-downtime key rotation: Verify against current or previously active keys
+    const secrets = getJwtVerificationSecrets();
+    let signatureValid = false;
     const sigBuf = Buffer.from(signature, "utf8");
-    const expSigBuf = Buffer.from(expectedSig, "utf8");
 
-    if (sigBuf.length !== expSigBuf.length || !timingSafeEqual(sigBuf, expSigBuf)) {
+    for (const secret of secrets) {
+      const expectedSig = createHmac("sha256", secret)
+        .update(`${headerB64}.${bodyB64}`)
+        .digest("base64url");
+      const expSigBuf = Buffer.from(expectedSig, "utf8");
+      if (sigBuf.length === expSigBuf.length && timingSafeEqual(sigBuf, expSigBuf)) {
+        signatureValid = true;
+        break;
+      }
+    }
+
+    if (!signatureValid) {
       return null;
     }
 
     const payload: AccessTokenPayload = JSON.parse(Buffer.from(bodyB64, "base64url").toString("utf8"));
     const nowSec = Math.floor(Date.now() / 1000);
+
+    // Enforce required structural claims
+    if (!payload.sub || typeof payload.sub !== "string") return null;
+    if (!payload.email || typeof payload.email !== "string") return null;
+    if (typeof payload.tokenVersion !== "number") return null;
+    if ((payload as any).type && (payload as any).type !== "access_token") return null;
 
     // Enforce issuer and audience
     if (payload.iss !== JWT_CONFIG.ISSUER || payload.aud !== JWT_CONFIG.AUDIENCE) {
@@ -245,6 +264,7 @@ export function signMfaChallengeToken(userId: string, email: string): string {
     sub: userId,
     email,
     type: "mfa_challenge",
+    jti: randomUUID(),
     iat: now,
     exp: now + TOKEN_LIFETIMES.MFA_CHALLENGE_SEC,
     iss: JWT_CONFIG.ISSUER,
@@ -274,14 +294,23 @@ export function verifyMfaChallengeToken(token: string): MfaChallengePayload | nu
     const header = JSON.parse(Buffer.from(headerB64, "base64url").toString("utf8"));
     if (header.alg !== JWT_CONFIG.ALGORITHM) return null;
 
-    const secret = getJwtSecret();
-    const expectedSig = createHmac("sha256", secret)
-      .update(`${headerB64}.${bodyB64}`)
-      .digest("base64url");
-
+    // Support safe key rotation for MFA challenge validation
+    const secrets = getJwtVerificationSecrets();
+    let signatureValid = false;
     const sigBuf = Buffer.from(signature, "utf8");
-    const expSigBuf = Buffer.from(expectedSig, "utf8");
-    if (sigBuf.length !== expSigBuf.length || !timingSafeEqual(sigBuf, expSigBuf)) {
+
+    for (const secret of secrets) {
+      const expectedSig = createHmac("sha256", secret)
+        .update(`${headerB64}.${bodyB64}`)
+        .digest("base64url");
+      const expSigBuf = Buffer.from(expectedSig, "utf8");
+      if (sigBuf.length === expSigBuf.length && timingSafeEqual(sigBuf, expSigBuf)) {
+        signatureValid = true;
+        break;
+      }
+    }
+
+    if (!signatureValid) {
       return null;
     }
 
@@ -289,6 +318,8 @@ export function verifyMfaChallengeToken(token: string): MfaChallengePayload | nu
     const nowSec = Math.floor(Date.now() / 1000);
 
     if (payload.type !== "mfa_challenge") return null;
+    if (!payload.jti || typeof payload.jti !== "string") return null;
+    if (!payload.sub || typeof payload.sub !== "string") return null;
     if (payload.iss !== JWT_CONFIG.ISSUER || payload.aud !== JWT_CONFIG.AUDIENCE) return null;
     if (nowSec > payload.exp + JWT_CONFIG.CLOCK_SKEW_SEC) return null;
 
@@ -318,12 +349,13 @@ export async function createRefreshToken(
 }
 
 /**
- * Rotates a refresh token.
+ * Rotates a refresh token with atomic concurrency protection and immediate compromise mitigation.
  * 
  * CRITICAL ADVERSARIAL DEFENSE:
- * 1. If an already-revoked refresh token is presented, the ENTIRE token family is revoked immediately.
- * 2. In addition, the user's token_version is incremented in the database to instantly invalidate
- *    all currently active access tokens for this compromised account (Defense-in-Depth).
+ * 1. Concurrency-safe atomic consumption prevents multiple simultaneous rotations of the same token.
+ * 2. If an already-revoked refresh token is presented (reuse / replay attempt):
+ *    - The ENTIRE token family is immediately revoked (RFC 6819 Section 5.2.2.3).
+ *    - The user's token_version is incremented in the database to instantly kill all active access tokens.
  */
 export async function rotateRefreshToken(
   db: EnterpriseDbClient,
@@ -333,23 +365,25 @@ export async function rotateRefreshToken(
   if (!familyId) return null;
 
   const tokenHash = createHash("sha256").update(rawToken).digest("hex");
-  const record = await db.findRefreshTokenByHash(tokenHash);
+  const { consumed, record, reuseDetected } = await db.atomicConsumeRefreshToken(tokenHash, "ROTATION");
 
-  if (!record) {
-    // Unknown token
-    return null;
-  }
-
-  if (record.is_revoked) {
+  if (reuseDetected && record) {
     // BREACH DETECTED: Token reuse attack!
     // Invalidate the entire token family immediately (RFC 6819 Section 5.2.2.3)
     await db.revokeTokenFamily(record.family_id, "REUSE_ATTACK_DETECTED");
+    await SecurityAuditService.recordEvent(db, {
+      eventType: "auth.token.reuse_attack_detected",
+      severity: "critical",
+      actorIp: "127.0.0.1",
+      actorId: record.user_id,
+      status: "blocked",
+      reason: "token_reuse_detected",
+      metadata: { familyId: record.family_id },
+    }).catch(() => {});
     return null;
   }
 
-  if (new Date(record.expires_at).getTime() < Date.now()) {
-    // Expired token
-    await db.consumeRefreshToken(record.id, "EXPIRED");
+  if (!consumed || !record) {
     return null;
   }
 
@@ -357,9 +391,6 @@ export async function rotateRefreshToken(
   if (!user || !user.is_active) {
     return null;
   }
-
-  // Atomically consume the used token
-  await db.consumeRefreshToken(record.id, "ROTATION");
 
   // Issue new token in the same continuous family
   const { rawToken: newRawToken } = await createRefreshToken(db, user.id, record.family_id);

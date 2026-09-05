@@ -14,7 +14,7 @@
  */
 
 import { randomBytes, createHmac, createCipheriv, createDecipheriv, createHash, timingSafeEqual } from "node:crypto";
-import { getMfaEncryptionKey } from "./auth-config.ts";
+import { getMfaEncryptionKey, getMfaDecryptionKeys } from "./auth-config.ts";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -216,27 +216,62 @@ export function encryptMfaSecret(plaintextSecret: string): string {
 }
 
 /**
- * Decrypts an MFA secret from storage
+ * Checks if an MFA secret payload conforms to the authenticated AES-256-GCM format: iv.tag.ciphertext
+ */
+export function isEncryptedMfaSecret(payload: unknown): boolean {
+  if (typeof payload !== "string" || !payload) return false;
+  const parts = payload.split(".");
+  return (
+    parts.length === 3 &&
+    parts.every((p) => p.length > 0 && /^[A-Za-z0-9_-]+$/.test(p))
+  );
+}
+
+/**
+ * Safely migrates legacy plaintext Base32 secret into authenticated AES-256-GCM envelope
+ */
+export function migrateLegacyPlaintextMfaSecret(plaintextSecret: string): string {
+  if (isEncryptedMfaSecret(plaintextSecret)) {
+    return plaintextSecret;
+  }
+  return encryptMfaSecret(plaintextSecret);
+}
+
+/**
+ * Decrypts an MFA secret from storage.
+ * 
+ * STRICT SECURITY:
+ * - Silent plaintext fallback is strictly forbidden and rejected.
+ * - Authenticates ciphertext integrity with AES-256-GCM authentication tag.
+ * - Supports key rotation by attempting configured decryption candidate keys.
  */
 export function decryptMfaSecret(storedPayload: string): string {
-  // If not encrypted in GCM format (e.g. legacy plain Base32 from test fixtures), return directly
-  if (!storedPayload.includes(".")) {
-    return storedPayload;
+  if (!isEncryptedMfaSecret(storedPayload)) {
+    throw new Error(
+      "MFA_DECRYPTION_ERROR: Stored MFA secret is not in valid authenticated encrypted format. Plaintext or corrupted records are strictly rejected."
+    );
   }
 
   const [ivB64, tagB64, cipherB64] = storedPayload.split(".");
-  if (!ivB64 || !tagB64 || !cipherB64) {
-    throw new Error("Corrupted MFA encrypted secret payload format");
-  }
-
-  const key = getMfaEncryptionKey();
   const iv = Buffer.from(ivB64, "base64url");
   const authTag = Buffer.from(tagB64, "base64url");
   const ciphertext = Buffer.from(cipherB64, "base64url");
 
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(authTag);
+  const candidateKeys = getMfaDecryptionKeys();
+  let lastError: unknown = null;
 
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return decrypted.toString("utf8");
+  for (const key of candidateKeys) {
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", key, iv);
+      decipher.setAuthTag(authTag);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      return decrypted.toString("utf8");
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw new Error(
+    `MFA_DECRYPTION_ERROR: Unable to authenticate or decrypt MFA secret with any configured key. Tag verification failed. (${lastError instanceof Error ? lastError.message : "Authentication tag error"})`
+  );
 }
